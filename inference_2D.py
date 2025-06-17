@@ -42,7 +42,7 @@ parser.add_argument(
 parser.add_argument(
     '-medsam_lite_checkpoint_path',
     type=str,
-    default="lite_medsam.pth",
+    default="work_dir/LiteMedSAM/lite_medsam.pth",
     help='path to the checkpoint of MedSAM-Lite',
     required=True
 )

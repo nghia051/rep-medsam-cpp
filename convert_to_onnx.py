@@ -7,6 +7,10 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from typing import Dict, List, Optional
+import openvino as ov
+from pathlib import Path
+import io
 
 from segment_anything.modeling import MaskDecoder, PromptEncoder, TwoWayTransformer
 from tiny_vit_sam import TinyViT
@@ -16,6 +20,8 @@ import argparse
 from collections import OrderedDict
 import pandas as pd
 from datetime import datetime
+
+from models.onnx import EncoderOnnxModel, DecoderOnnxModel
 
 
 #%% set seeds
@@ -88,35 +94,6 @@ makedirs(pred_save_dir, exist_ok=True)
 device = torch.device(args.device)
 image_size = 256
 
-def resize_longest_side(image, target_length=256):
-    """
-    Resize image to target_length while keeping the aspect ratio
-    Expects a numpy array with shape HxWxC in uint8 format.
-    """
-    oldh, oldw = image.shape[0], image.shape[1]
-    scale = target_length * 1.0 / max(oldh, oldw)
-    newh, neww = oldh * scale, oldw * scale
-    neww, newh = int(neww + 0.5), int(newh + 0.5)
-    target_size = (neww, newh)
-
-    return cv2.resize(image, target_size, interpolation=cv2.INTER_AREA)
-
-def pad_image(image, target_size=256):
-    """
-    Pad image to target_size
-    Expects a numpy array with shape HxWxC in uint8 format.
-    """
-    # Pad
-    h, w = image.shape[0], image.shape[1]
-    padh = target_size - h
-    padw = target_size - w
-    if len(image.shape) == 3: ## Pad image
-        image_padded = np.pad(image, ((0, padh), (0, padw), (0, 0)))
-    else: ## Pad gt mask
-        image_padded = np.pad(image, ((0, padh), (0, padw)))
-
-    return image_padded
-
 class MedSAM_Lite(nn.Module):
     def __init__(
             self, 
@@ -183,142 +160,6 @@ class MedSAM_Lite(nn.Module):
 
         return masks
 
-
-def show_mask(mask, ax, mask_color=None, alpha=0.5):
-    """
-    show mask on the image
-
-    Parameters
-    ----------
-    mask : numpy.ndarray
-        mask of the image
-    ax : matplotlib.axes.Axes
-        axes to plot the mask
-    mask_color : numpy.ndarray
-        color of the mask
-    alpha : float
-        transparency of the mask
-    """
-    if mask_color is not None:
-        color = np.concatenate([mask_color, np.array([alpha])], axis=0)
-    else:
-        color = np.array([251/255, 252/255, 30/255, alpha])
-    h, w = mask.shape[-2:]
-    mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
-    ax.imshow(mask_image)
-
-
-def show_box(box, ax, edgecolor='blue'):
-    """
-    show bounding box on the image
-
-    Parameters
-    ----------
-    box : numpy.ndarray
-        bounding box coordinates in the original image
-    ax : matplotlib.axes.Axes
-        axes to plot the bounding box
-    edgecolor : str
-        color of the bounding box
-    """
-    x0, y0 = box[0], box[1]
-    w, h = box[2] - box[0], box[3] - box[1]
-    ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor=edgecolor, facecolor=(0,0,0,0), lw=2))     
-
-
-def get_bbox256(mask_256, bbox_shift=3):
-    """
-    Get the bounding box coordinates from the mask (256x256)
-
-    Parameters
-    ----------
-    mask_256 : numpy.ndarray
-        the mask of the resized image
-
-    bbox_shift : int
-        Add perturbation to the bounding box coordinates
-    
-    Returns
-    -------
-    numpy.ndarray
-        bounding box coordinates in the resized image
-    """
-    y_indices, x_indices = np.where(mask_256 > 0)
-    x_min, x_max = np.min(x_indices), np.max(x_indices)
-    y_min, y_max = np.min(y_indices), np.max(y_indices)
-    # add perturbation to bounding box coordinates and test the robustness
-    # this can be removed if you do not want to test the robustness
-    H, W = mask_256.shape
-    x_min = max(0, x_min - bbox_shift)
-    x_max = min(W, x_max + bbox_shift)
-    y_min = max(0, y_min - bbox_shift)
-    y_max = min(H, y_max + bbox_shift)
-
-    bboxes256 = np.array([x_min, y_min, x_max, y_max])
-
-    return bboxes256
-
-def resize_box_to_256(box, original_size):
-    """
-    the input bounding box is obtained from the original image
-    here, we rescale it to the coordinates of the resized image
-
-    Parameters
-    ----------
-    box : numpy.ndarray
-        bounding box coordinates in the original image
-    original_size : tuple
-        the original size of the image
-
-    Returns
-    -------
-    numpy.ndarray
-        bounding box coordinates in the resized image
-    """
-    new_box = np.zeros_like(box)
-    ratio = 256 / max(original_size)
-    for i in range(len(box)):
-        new_box[i] = int(box[i] * ratio)
-
-    return new_box
-
-
-@torch.no_grad()
-def medsam_inference(medsam_model, img_embed, box_256, new_size, original_size):
-    """
-    Perform inference using the LiteMedSAM model.
-
-    Args:
-        medsam_model (MedSAMModel): The MedSAM model.
-        img_embed (torch.Tensor): The image embeddings.
-        box_256 (numpy.ndarray): The bounding box coordinates.
-        new_size (tuple): The new size of the image.
-        original_size (tuple): The original size of the image.
-    Returns:
-        tuple: A tuple containing the segmented image and the intersection over union (IoU) score.
-    """
-    box_torch = torch.as_tensor(box_256[None, None, ...], dtype=torch.float, device=img_embed.device)
-    
-    sparse_embeddings, dense_embeddings = medsam_model.prompt_encoder(
-        points = None,
-        boxes = box_torch,
-        masks = None,
-    )
-    low_res_logits, iou = medsam_model.mask_decoder(
-        image_embeddings=img_embed, # (B, 256, 64, 64)
-        image_pe=medsam_model.prompt_encoder.get_dense_pe(), # (1, 256, 64, 64)
-        sparse_prompt_embeddings=sparse_embeddings, # (B, 2, 256)
-        dense_prompt_embeddings=dense_embeddings, # (B, 256, 64, 64)
-        multimask_output=False
-    )
-
-    low_res_pred = medsam_model.postprocess_masks(low_res_logits, new_size, original_size)
-    low_res_pred = torch.sigmoid(low_res_pred)  
-    low_res_pred = low_res_pred.squeeze().cpu().numpy()  
-    medsam_seg = (low_res_pred > 0.5).astype(np.uint8)
-
-    return medsam_seg, iou
-
 medsam_lite_image_encoder = TinyViT(
     img_size=256,
     in_chans=3,
@@ -371,25 +212,116 @@ medsam_lite_model.load_state_dict(lite_medsam_checkpoint)
 medsam_lite_model.to(device)
 medsam_lite_model.eval()
 
-if __name__ == '__main__':
-    # Dummy input for tracing (adjust shape to match your model input)
-    dummy_input = torch.randn(1, 3, 256, 256)  # Example: (batch, channels, height, width)
-    
-    dummy_box = torch.tensor([[50, 50, 200, 200]], dtype=torch.float32)
+def convert_to_openvino(onnx_model: Path):
+    model = ov.convert_model(onnx_model)
+    ov.save_model(model, onnx_model.with_suffix(".xml"), compress_to_fp16=False)
 
-    # Export to ONNX
+
+def export_onnx(
+    onnx_model: nn.Module,
+    dummy_inputs: Dict[str, torch.Tensor],
+    dynamic_axes: Optional[Dict[str, Dict[int, str]]],
+    output_names: List[str],
+    output_file: Path,
+):
+    _ = onnx_model(**dummy_inputs)
+
+    buffer = io.BytesIO()
     torch.onnx.export(
-        medsam_lite_model,
-        (dummy_input, dummy_box),
-        "medsam_lite.onnx",
+        onnx_model,
+        tuple(dummy_inputs.values()),
+        buffer,
         export_params=True,
-        opset_version=12,
+        verbose=False,
+        opset_version=17,
         do_constant_folding=True,
-        input_names=['image', 'box_np'],
-        output_names=['low_res_masks'],
-        dynamic_axes={
-            'image': {0: 'batch_size'},
-            'box_np': {0: 'batch_size'},
-            'low_res_masks': {0: 'batch_size'}
-        }
+        input_names=list(dummy_inputs.keys()),
+        output_names=output_names,
+        dynamic_axes=dynamic_axes,
     )
+    buffer.seek(0, 0)
+
+    # simplify the ONNX model
+    # onnx_model = onnx.load_model(buffer)
+    # onnx_model, success = simplify(onnx_model)
+    # assert success
+    # new_buffer = io.BytesIO()
+    # onnx.save(onnx_model, new_buffer)
+    # buffer = new_buffer
+    # buffer.seek(0, 0)
+
+    with open(output_file, "wb") as f:
+        f.write(buffer.read())
+
+    convert_to_openvino(output_file)
+
+
+def export_encoder(sam_model: MedSAM_Lite):
+    onnx_model = EncoderOnnxModel(
+        image_encoder=sam_model.image_encoder,
+        preprocess_image=True,
+        image_encoder_input_size=256,
+        scale_image=True,
+        normalize_image=False,
+    )
+
+    PreprocessImage = True
+    if PreprocessImage:
+        dummy_inputs = {
+            "image": torch.randint(0, 256, (256, 384, 3), dtype=torch.uint8),
+            "original_size": torch.tensor([256, 384], dtype=torch.int16),
+        }
+        dynamic_axes = {"image": {0: "image_height", 1: "image_width"}}
+        output_names = ["image_embeddings"]
+    else:
+        dummy_inputs = {
+            "image": torch.randn(
+                (
+                    256,
+                    256,
+                    3,
+                ),
+                dtype=torch.float32,
+            ),
+        }
+        dynamic_axes = None
+        output_names = ["image_embeddings"]
+
+    export_onnx(
+        onnx_model=onnx_model,
+        dummy_inputs=dummy_inputs,
+        dynamic_axes=dynamic_axes,
+        output_names=output_names,
+        output_file=Path("./output") / "encoder.onnx",
+    )
+
+def export_decoder(sam_model: MedSAM_Lite):
+    onnx_model = DecoderOnnxModel(
+        mask_decoder=sam_model.mask_decoder,
+        prompt_encoder=sam_model.prompt_encoder,
+        image_encoder_input_size=256,
+    )
+
+    embed_dim = onnx_model.prompt_encoder.embed_dim
+    embed_size = onnx_model.prompt_encoder.image_embedding_size
+
+    dummy_inputs = {
+        "image_embeddings": torch.randn(1, embed_dim, *embed_size, dtype=torch.float32),
+        "boxes": torch.rand(4, dtype=torch.float32),
+    }
+    output_names = ["masks"]
+
+    export_onnx(
+        onnx_model=onnx_model,
+        dummy_inputs=dummy_inputs,
+        dynamic_axes=None,
+        output_names=output_names,
+        output_file=Path("./output") / "decoder.onnx",
+    )
+
+if __name__ == '__main__':
+    print("Exporting encoder...")
+    export_encoder(medsam_lite_model)
+
+    print("Exporting decoder...")
+    export_decoder(medsam_lite_model)
