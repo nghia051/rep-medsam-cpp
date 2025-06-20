@@ -13,7 +13,7 @@ setup(
     author="Jun Ma",
     python_requires=">=3.9",
     install_requires=["monai", "timm", "matplotlib", "scikit-image", "SimpleITK>=2.2.1", "pyarrow", "pandas", "nibabel", "tqdm", "scipy", "ipympl", "opencv-python", "jupyterlab", "ipywidgets"],
-    packages=find_packages(exclude="notebooks"),
+    packages=find_packages(include=["*", "onnxsim", "onnxsim.*"], exclude=["notebooks"]),
     extras_require={
         "all": ["pycocotools", "opencv-python", "onnx", "onnxruntime"],
         "dev": ["flake8", "isort", "black", "mypy"],

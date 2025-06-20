@@ -1,27 +1,21 @@
-from os import listdir, makedirs
-from os.path import join, isfile, basename
-from glob import glob
-from tqdm import tqdm
-from time import time
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from typing import Dict, List, Optional
 import openvino as ov
 from pathlib import Path
 import io
+import onnx
+from onnxsim import simplify
+from onnxruntime.quantization import QuantType
+from onnxruntime.quantization.quantize import quantize_dynamic
+import onnxruntime as ort
 
 from segment_anything.modeling import MaskDecoder, PromptEncoder, TwoWayTransformer
 from tiny_vit_sam import TinyViT
-from matplotlib import pyplot as plt
-import cv2
 import argparse
-from collections import OrderedDict
-import pandas as pd
-from datetime import datetime
 
-from models.onnx import EncoderOnnxModel, DecoderOnnxModel
+from models.onnx import DecoderOnnxModel
 
 
 #%% set seeds
@@ -32,21 +26,6 @@ np.random.seed(2024)
 
 parser = argparse.ArgumentParser()
 
-parser.add_argument(
-    '-i',
-    '--input_dir',
-    type=str,
-    default='test_demo/imgs/',
-    # required=True,
-    help='root directory of the data',
-)
-parser.add_argument(
-    '-o',
-    '--output_dir',
-    type=str,
-    default='test_demo/segs/',
-    help='directory to save the prediction',
-)
 parser.add_argument(
     '-lite_medsam_checkpoint_path',
     type=str,
@@ -59,40 +38,11 @@ parser.add_argument(
     default="cpu",
     help='device to run the inference',
 )
-parser.add_argument(
-    '-num_workers',
-    type=int,
-    default=4,
-    help='number of workers for inference with multiprocessing',
-)
-parser.add_argument(
-    '--save_overlay',
-    default=True,
-    action='store_true',
-    help='whether to save the overlay image'
-)
-parser.add_argument(
-    '-png_save_dir',
-    type=str,
-    default='./overlay',
-    help='directory to save the overlay image'
-)
 
 args = parser.parse_args()
 
-data_root = args.input_dir
-pred_save_dir = args.output_dir
-save_overlay = args.save_overlay
-num_workers = args.num_workers
-if save_overlay:
-    assert args.png_save_dir is not None, "Please specify the directory to save the overlay image"
-    png_save_dir = args.png_save_dir
-    makedirs(png_save_dir, exist_ok=True)
-
 lite_medsam_checkpoint_path = args.lite_medsam_checkpoint_path
-makedirs(pred_save_dir, exist_ok=True)
 device = torch.device(args.device)
-image_size = 256
 
 class MedSAM_Lite(nn.Module):
     def __init__(
@@ -216,90 +166,62 @@ def convert_to_openvino(onnx_model: Path):
     model = ov.convert_model(onnx_model)
     ov.save_model(model, onnx_model.with_suffix(".xml"), compress_to_fp16=False)
 
+def export_encoder(sam_model: MedSAM_Lite, export_optimized: bool = False, export_quantized: bool = False):
+    dummy_inputs = torch.randn((1, 3, 256, 256,), dtype = torch.float32)
 
-def export_onnx(
-    onnx_model: nn.Module,
-    dummy_inputs: Dict[str, torch.Tensor],
-    dynamic_axes: Optional[Dict[str, Dict[int, str]]],
-    output_names: List[str],
-    output_file: Path,
-):
-    _ = onnx_model(**dummy_inputs)
+    output_file = Path("./new_model") / "encoder.onnx"
 
     buffer = io.BytesIO()
     torch.onnx.export(
-        onnx_model,
-        tuple(dummy_inputs.values()),
-        buffer,
+        model=sam_model.image_encoder,
+        args=dummy_inputs,
+        f=buffer,
         export_params=True,
         verbose=False,
         opset_version=17,
-        do_constant_folding=True,
-        input_names=list(dummy_inputs.keys()),
-        output_names=output_names,
-        dynamic_axes=dynamic_axes,
+        do_constant_folding=True, 
+        input_names=['image'],
+        output_names=['image_embeddings'],
     )
     buffer.seek(0, 0)
 
     # simplify the ONNX model
-    # onnx_model = onnx.load_model(buffer)
-    # onnx_model, success = simplify(onnx_model)
-    # assert success
-    # new_buffer = io.BytesIO()
-    # onnx.save(onnx_model, new_buffer)
-    # buffer = new_buffer
-    # buffer.seek(0, 0)
+    onnx_model = onnx.load_model(buffer)
+    onnx_model, success = simplify(onnx_model)
+    assert success
+    new_buffer = io.BytesIO()
+    onnx.save(onnx_model, new_buffer)
+    buffer = new_buffer
+    buffer.seek(0, 0)
 
     with open(output_file, "wb") as f:
         f.write(buffer.read())
-
+    
     convert_to_openvino(output_file)
 
+    if export_optimized:
+        optimized_output_file = output_file.with_suffix(".optimized.onnx")
+        opt = ort.SessionOptions()
+        opt.optimized_model_filepath = optimized_output_file.as_posix()
+        opt.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        _ = ort.InferenceSession(output_file, opt, providers=["CPUExecutionProvider"])
 
-def export_encoder(sam_model: MedSAM_Lite):
-    onnx_model = EncoderOnnxModel(
-        image_encoder=sam_model.image_encoder,
-        preprocess_image=True,
-        image_encoder_input_size=256,
-        scale_image=True,
-        normalize_image=False,
-    )
+    if export_quantized:
+        quantized_output_file = output_file.with_suffix(".quantized.onnx")
+        quantize_dynamic(
+            model_input=output_file,
+            model_output=quantized_output_file,
+            per_channel=False,
+            reduce_range=False,
+            weight_type=QuantType.QUInt8,
+        )
 
-    PreprocessImage = True
-    if PreprocessImage:
-        dummy_inputs = {
-            "image": torch.randint(0, 256, (256, 384, 3), dtype=torch.uint8),
-            "original_size": torch.tensor([256, 384], dtype=torch.int16),
-        }
-        dynamic_axes = {"image": {0: "image_height", 1: "image_width"}}
-        output_names = ["image_embeddings"]
-    else:
-        dummy_inputs = {
-            "image": torch.randn(
-                (
-                    256,
-                    256,
-                    3,
-                ),
-                dtype=torch.float32,
-            ),
-        }
-        dynamic_axes = None
-        output_names = ["image_embeddings"]
+        convert_to_openvino(quantized_output_file)
 
-    export_onnx(
-        onnx_model=onnx_model,
-        dummy_inputs=dummy_inputs,
-        dynamic_axes=dynamic_axes,
-        output_names=output_names,
-        output_file=Path("./output") / "encoder.onnx",
-    )
-
-def export_decoder(sam_model: MedSAM_Lite):
+def export_decoder(sam_model: MedSAM_Lite, export_optimized: bool = False, export_quantized: bool = False):
     onnx_model = DecoderOnnxModel(
         mask_decoder=sam_model.mask_decoder,
         prompt_encoder=sam_model.prompt_encoder,
-        image_encoder_input_size=256,
     )
 
     embed_dim = onnx_model.prompt_encoder.embed_dim
@@ -307,21 +229,69 @@ def export_decoder(sam_model: MedSAM_Lite):
 
     dummy_inputs = {
         "image_embeddings": torch.randn(1, embed_dim, *embed_size, dtype=torch.float32),
-        "boxes": torch.rand(4, dtype=torch.float32),
+        "boxes": torch.rand((1, 4), dtype=torch.float32),
     }
     output_names = ["masks"]
 
-    export_onnx(
-        onnx_model=onnx_model,
-        dummy_inputs=dummy_inputs,
-        dynamic_axes=None,
+    output_file = Path("./new_model") / "decoder.onnx"
+
+    buffer = io.BytesIO()
+    torch.onnx.export(
+        model=onnx_model,
+        args=dummy_inputs,
+        f=buffer,
+        export_params=True,
+        verbose=False,
+        opset_version=17,
+        do_constant_folding=True, 
+        input_names=list(dummy_inputs.keys()),
         output_names=output_names,
-        output_file=Path("./output") / "decoder.onnx",
+        dynamic_axes={
+            "boxes": {0: "num_boxes"},
+        },
     )
+    buffer.seek(0, 0)
+
+    # simplify the ONNX model
+    onnx_model = onnx.load_model(buffer)
+    onnx_model, success = simplify(onnx_model)
+    assert success
+    new_buffer = io.BytesIO()
+    onnx.save(onnx_model, new_buffer)
+    buffer = new_buffer
+    buffer.seek(0, 0)
+
+    with open(output_file, "wb") as f:
+        f.write(buffer.read())
+    
+    convert_to_openvino(output_file)
+
+    if export_optimized:
+        optimized_output_file = output_file.with_suffix(".optimized.onnx")
+        opt = ort.SessionOptions()
+        opt.optimized_model_filepath = optimized_output_file.as_posix()
+        opt.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        _ = ort.InferenceSession(output_file, opt, providers=["CPUExecutionProvider"])
+
+    if export_quantized:
+        quantized_output_file = output_file.with_suffix(".quantized.onnx")
+        quantize_dynamic(
+            model_input=output_file,
+            model_output=quantized_output_file,
+            per_channel=False,
+            reduce_range=False,
+            weight_type=QuantType.QUInt8,
+        )
+
+        convert_to_openvino(quantized_output_file)
 
 if __name__ == '__main__':
-    print("Exporting encoder...")
-    export_encoder(medsam_lite_model)
+    # print("Exporting encoder...")
+    # export_encoder(medsam_lite_model,
+    #                export_optimized=False,
+    #                export_quantized=True)
 
     print("Exporting decoder...")
-    export_decoder(medsam_lite_model)
+    export_decoder(medsam_lite_model,
+                   export_optimized=False,
+                   export_quantized=True)

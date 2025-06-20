@@ -557,7 +557,6 @@ if __name__ == '__main__':
         efficiency['time'].append(end_time - start_time)
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(current_time, 'file name:', basename(img_npz_file), 'time cost:', np.round(end_time - start_time, 4))
-        break
 
     efficiency_df = pd.DataFrame(efficiency)
     efficiency_df.to_csv(join(pred_save_dir, 'efficiency.csv'), index=False)

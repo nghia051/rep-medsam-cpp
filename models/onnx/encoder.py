@@ -11,7 +11,7 @@ class EncoderOnnxModel(nn.Module):
         self,
         image_encoder: nn.Module,
         preprocess_image: bool = True,
-        image_encoder_input_size: int = 512,
+        image_encoder_input_size: int = 256,
         scale_image: bool = True,
         normalize_image: bool = False,
         pixel_mean: List[float] = [123.675, 116.28, 103.53],
@@ -32,52 +32,11 @@ class EncoderOnnxModel(nn.Module):
     def forward(
         self,
         image: torch.Tensor,
-        original_size: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         """
         image: (H, W, 3)
         """
         image = image.permute(2, 0, 1).unsqueeze(0)  # (1, 3, H, W)
-
-        if not self.preprocess_image:
-            return self.image_encoder(image)
-
-        # Resize longest side
-        new_size = self.get_preprocess_shape(
-            original_size, self.image_encoder_input_size
-        )
-        image = F.interpolate(
-            image,
-            (new_size[0], new_size[1]),
-            mode=self.interpolation,
-            align_corners=False,
-        )
-
-        image = image.to(torch.float32)
-
-        # Min max scale
-        if self.scale_image:
-            min_val = image.amin((-3, -2, -1), keepdim=True)
-            max_val = image.amax((-3, -2, -1), keepdim=True)
-            image = (image - min_val) / torch.clip(
-                max_val - min_val, min=1e-8, max=None
-            )
-
-        # Normalize
-        if self.normalize_image:
-            image = F2.normalize(image, self.pixel_mean, self.pixel_std)
-
-        # Pad
-        image = F.pad(
-            image,
-            (
-                0,
-                self.image_encoder_input_size - image.shape[-1],
-                0,
-                self.image_encoder_input_size - image.shape[-2],
-            ),
-            value=0,
-        )
 
         return self.image_encoder(image)
 

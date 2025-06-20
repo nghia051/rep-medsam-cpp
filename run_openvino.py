@@ -1,8 +1,21 @@
 from openvino.runtime import Core
-import numpy as np
-import cv2
-import torch
 from PIL import Image
+from os.path import join, basename
+from glob import glob
+from tqdm import tqdm
+from time import time
+import numpy as np
+import torch
+import torch.nn.functional as F
+from matplotlib import pyplot as plt
+import cv2
+
+
+#%% set seeds
+torch.set_float32_matmul_precision('high')
+torch.manual_seed(2024)
+torch.cuda.manual_seed(2024)
+np.random.seed(2024)
 
 core = Core()
 
@@ -39,15 +52,75 @@ def load_models(encoder_path: str, decoder_path: str):
     print("Encoder Output:", encoder_output.any_name, encoder_output.get_partial_shape())
 
     # Check decoder input/output names
-    decoder_inputs = decoder_compiled.inputs
-    decoder_output = decoder_compiled.output(0)
-    for i, inp in enumerate(decoder_inputs):
-        print(f"Decoder Input {i}:", inp.any_name, inp.shape)
-    print("Decoder Output:", decoder_output.any_name, decoder_output.shape)
+    # decoder_inputs = decoder_compiled.inputs
+    # decoder_output = decoder_compiled.output(0)
+    # for i, inp in enumerate(decoder_inputs):
+    #     print(f"Decoder Input {i}:", inp.any_name, inp.shape)
+    # print("Decoder Output:", decoder_output.any_name, decoder_output.shape)
 
     print("=====================================")
-    
+
     return encoder_compiled, decoder_compiled
+
+def show_mask(mask, ax, mask_color=None, alpha=0.5):
+    """
+    show mask on the image
+
+    Parameters
+    ----------
+    mask : numpy.ndarray
+        mask of the image
+    ax : matplotlib.axes.Axes
+        axes to plot the mask
+    mask_color : numpy.ndarray
+        color of the mask
+    alpha : float
+        transparency of the mask
+    """
+    if mask_color is not None:
+        color = np.concatenate([mask_color, np.array([alpha])], axis=0)
+    else:
+        color = np.array([251/255, 252/255, 30/255, alpha])
+    h, w = mask.shape[-2:]
+    mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
+    ax.imshow(mask_image)
+
+
+def show_box(box, ax, edgecolor='blue'):
+    """
+    show bounding box on the image
+
+    Parameters
+    ----------
+    box : numpy.ndarray
+        bounding box coordinates in the original image
+    ax : matplotlib.axes.Axes
+        axes to plot the bounding box
+    edgecolor : str
+        color of the bounding box
+    """
+    x0, y0 = box[0], box[1]
+    w, h = box[2] - box[0], box[3] - box[1]
+    ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor=edgecolor, facecolor=(0,0,0,0), lw=2))  
+
+def save_overlay_image(img, segs, boxes, output_path):
+    fig, ax = plt.subplots(1, 2, figsize=(10, 5))
+    ax[0].imshow(img)
+    ax[1].imshow(img)
+    ax[0].set_title("Image")
+    ax[1].set_title("LiteMedSAM Segmentation")
+    ax[0].axis('off')
+    ax[1].axis('off')
+
+    for i, box in enumerate(boxes):
+        color = np.random.rand(3)  # Random color for each box
+        box_viz = box
+        show_box(box_viz, ax[1], edgecolor='blue')
+        show_mask((segs == i+1).astype(np.uint8), ax[1], mask_color=color)
+
+    plt.tight_layout()
+    plt.savefig(output_path, dpi=300)
+    plt.close()
 
 def resize_longest_side(image, target_length=256):
     """
@@ -78,73 +151,118 @@ def pad_image(image, target_size=256):
 
     return image_padded
 
-encoder_path = "./output_model/encoder.xml"
-decoder_path = "./output_model/decoder.xml"
+def resize_box_to_256(box, original_size):
+    """
+    the input bounding box is obtained from the original image
+    here, we rescale it to the coordinates of the resized image
+
+    Parameters
+    ----------
+    box : numpy.ndarray
+        bounding box coordinates in the original image
+    original_size : tuple
+        the original size of the image
+
+    Returns
+    -------
+    numpy.ndarray
+        bounding box coordinates in the resized image
+    """
+    new_box = np.zeros_like(box)
+    ratio = 256 / max(original_size)
+    for i in range(len(box)):
+        new_box[i] = int(box[i] * ratio)
+
+    return new_box
+
+def postprocess_masks(masks, new_size, original_size):
+    # Crop
+    masks = masks[..., :new_size[0], :new_size[1]]
+    # Resize
+    masks = F.interpolate(
+        masks,
+        size=(original_size[0], original_size[1]),
+        mode="bilinear",
+        align_corners=False,
+    )
+
+    return masks
+
+encoder_path = "./new_model/encoder.xml"
+decoder_path = "./new_model/decoder.xml"
 
 encoder_compiled, decoder_compiled = load_models(encoder_path, decoder_path)
 
-def nomormalize8(I: np.ndarray) -> np.ndarray:
-    mn = I.min()
-    mx = I.max()
+def compute_image_embeddings(img_256_tensor):
+    image_embeddings_numpy = encoder_compiled([img_256_tensor])["image_embeddings"]
 
-    mx -= mn
+    image_embeddings_tensor = torch.from_numpy(image_embeddings_numpy)
 
-    I = (I - mn) / mx
-    I = I * 255
-    
-    return I.astype(np.uint8)
+    return image_embeddings_tensor
 
-def load_and_prepare_image(img_npz_file: str, target_size=256):
+def compute_segmentation_masks(image_embeddings_tensor, boxes_tensor, new_size, original_size):
+    segs = np.zeros(original_size, dtype=np.uint8)
+    low_res_logits = decoder_compiled([image_embeddings_tensor, boxes_tensor])["masks"]
+    low_res_logits = torch.from_numpy(low_res_logits)
+
+    low_res_pred = postprocess_masks(low_res_logits, new_size, original_size)
+    low_res_pred = torch.sigmoid(low_res_pred)
+    low_res_pred = low_res_pred.squeeze(1).cpu().numpy()
+    medsam_seg = (low_res_pred > 0.5).astype(np.uint8)
+
+    for idx in range(len(boxes_tensor)):
+        segs[medsam_seg[idx] > 0] = idx + 1
+
+    return segs
+
+def load_and_process_image(img_npz_file: str):
     npz_data = np.load(img_npz_file, 'r', allow_pickle=True)
     img_3c = npz_data['imgs'] # (H, W, 3)
     assert np.max(img_3c)<256, f'input data should be in range [0, 255], but got {np.unique(img_3c)}'
+
     H, W = img_3c.shape[:2]
-    boxes = npz_data['boxes']
-
-    print(f"Image shape: {img_3c.shape}, dtype: {img_3c.dtype}, min: {img_3c.min()}, max: {img_3c.max()}")  # should be [H, W, 3]
-    print(f"Boxes shape: {boxes.shape}, dtype: {boxes.dtype}, min: {boxes.min()}, max: {boxes.max()}")  # should be [1, 4]
-    ## preprocessing
-    img_256 = resize_longest_side(img_3c, target_size)
-    print(f"Image shape after resizing: {img_256.shape}, dtype: {img_256.dtype}, min: {img_256.min()}, max: {img_256.max()}")  # should be [256, 256, 3]
-
-    img_256_padded = pad_image(img_256, target_size)
-    print(f"Image shape after padding: {img_256_padded.shape}, dtype: {img_256_padded.dtype}, min: {img_256_padded.min()}, max: {img_256_padded.max()}")
-
-    img_256_padded = img_256_padded.astype(np.float32) / 255.0  # Normalize to [0, 1]
-    print(f"Image shape after normalization: {img_256_padded.shape}, dtype: {img_256_padded.dtype}, min: {img_256_padded.min()}, max: {img_256_padded.max()}")
-
-    encoder_output = encoder_compiled([img_256_padded])
-    encoder_result = encoder_output[encoder_compiled.output(0)]
-
-    print("Encoder result shape:", encoder_result.shape)  # should be [1, 256, 64, 64]
-
-    decoder_inputs = {
-        decoder_compiled.input(0).any_name: encoder_result,
-        decoder_compiled.input(1).any_name: boxes[0]
-    }
-    decoder_result = decoder_compiled(decoder_inputs)["masks"]
-
-    print("Decoder result shape:", decoder_result.shape)  # should be [1, 256, 256]
+    boxes = npz_data['boxes'].to_device("cpu")
     
-    mask = decoder_result.squeeze()  # shape [256, 256]
-    print(f"Mask shape: {mask.shape}, dtype: {mask.dtype}, min: {mask.min()}, max: {mask.max()}")
+    # preprocess image
+    img_256 = resize_longest_side(img_3c, 256)
 
-    mask_norm = (mask - mask.min()) / (mask.max() - mask.min() + 1e-8) * 255
-    print(f"Mask shape norm: {mask_norm.shape}, dtype: {mask_norm.dtype}, min: {mask_norm.min()}, max: {mask_norm.max()}")
+    img_256_norm = (img_256 - img_256.min()) / np.clip(
+        img_256.max() - img_256.min(), a_min=1e-8, a_max=None
+    )
+    # print(f"Image shape after normalization: {img_256_norm.shape}, dtype: {img_256_norm.dtype}, min: {img_256_norm.min()}, max: {img_256_norm.max()}")  # should be [256, 256, 3]
 
-    mask_uint8 = mask_norm.astype(np.uint8)
-    print(f"Mask shape uint8: {mask_uint8.shape}, dtype: {mask_uint8.dtype}, min: {mask_uint8.min()}, max: {mask_uint8.max()}")
+    img_256_padded = pad_image(img_256_norm, 256)
+    # print(f"Image shape after padding: {img_256_padded.shape}, dtype: {img_256_padded.dtype}, min: {img_256_padded.min()}, max: {img_256_padded.max()}")
 
-    # img = Image.fromarray(mask_uint8)
-    # img.show()
+    img_256_tensor = torch.tensor(img_256_padded).float().permute(2, 0, 1).unsqueeze(0).to("cpu")  # shape [1, 3, 256, 256]
+    # print(f"Image tensor shape: {img_256_tensor.shape}, dtype: {img_256_tensor.dtype}, min: {img_256_tensor.min()}, max: {img_256_tensor.max()}")
 
-    cv2.imwrite("output_mask.png", mask_uint8)
+    image_embeddings_tensor = compute_image_embeddings(img_256_tensor)  # shape [1, 256, 64, 64]
 
-    # Normalize mask to [0, 1] range
-    # mask = nomormalize8(mask)
-    # print(f"Mask shape after normalization: {mask.shape}, dtype: {mask.dtype}, min: {mask.min()}, max: {mask.max()}")
+    boxes_256 = np.empty((0, 4), dtype=np.float32)  # Initialize an empty array for boxes in 256x256 space
+    for box in boxes:
+        box256 = resize_box_to_256(box, original_size=(H, W))
+        boxes_256 = np.vstack((boxes_256, box256))  # Append the resized box to the array
+     
+    boxes_tensor = torch.tensor(boxes_256, dtype=torch.float32).to("cpu")  # shape [B, 4]
+    
+    segs = compute_segmentation_masks(image_embeddings_tensor, boxes_tensor,
+                                      new_size=img_256.shape[:2], original_size=(H, W))
+
+    np.savez_compressed(
+        join("./test_segs/", basename(img_npz_file)),
+        segs=segs,
+    )
+
+    # save overlay
+    # save_overlay_image(img_3c, segs, boxes, join("./test_overlay", basename(img_npz_file).replace('.npz', '_overlay.png')))
 
 if __name__ == '__main__':
-    load_and_prepare_image("./test_demo/imgs/2DBox_CXR_demo.npz", target_size=256)
+    img_npz_files = sorted(glob(join("./test_demo/imgs/", '*.npz'), recursive=True))
 
-    
+    for img_npz_file in tqdm(img_npz_files):
+        if basename(img_npz_file).startswith('2D'):
+            start_time = time()
+            load_and_process_image(img_npz_file)
+            end_time = time()
+            print('file name:', basename(img_npz_file), 'time cost:', np.round(end_time - start_time, 4))

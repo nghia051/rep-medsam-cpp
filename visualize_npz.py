@@ -47,14 +47,10 @@ def visualize_npz(npz_file: str):
     # array = nomormalize8(array)
     # print(f"Shape of the array after normalizing: {array.shape}, dtype: {array.dtype}")
 
-    box_key = list(data.keys())[1]
-    box = data[box_key]
-    print(f"Box: {box}")
-
     img = Image.fromarray(array)
     img.show()
 
 if __name__ == '__main__':
-    pred_file = './test_demo/imgs/2DBox_CXR_demo.npz'
+    pred_file = './test_demo/segs/2DBox_CXR_demo.npz'
 
     visualize_npz(pred_file)
