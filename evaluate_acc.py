@@ -54,15 +54,21 @@ def compute_multi_class_nsd(gt, seg, spacing, tolerance=2.0):
 
 if __name__ == '__main__':
     gt_path = "./dataset/gts/"
-    seg_path = "./output/rep_medsam/segs/"
-    output_csv = "./output/rep_medsam/seg_metrics.csv"
+
+    base_output_path = "./output/lite_medsam/"
+    seg_path = base_output_path + "segs/"
+    output_csv = base_output_path + "seg_metrics.csv"
+    output_by_target_csv = base_output_path + "seg_metrics_by_target.csv"
 
     seg_files = sorted(Path(seg_path).glob("*.npz"))
 
     seg_metrics = OrderedDict()
-    seg_metrics["case"] = [] 
+    seg_metrics["case"] = []
     seg_metrics["dsc"] = []
     seg_metrics["nsd"] = []
+
+    dsc_by_target = OrderedDict()
+    nsd_by_target = OrderedDict()
 
     for seg_file in tqdm(seg_files):
         gt_file = Path(gt_path) / seg_file.name
@@ -93,6 +99,15 @@ if __name__ == '__main__':
         seg_metrics["dsc"].append(np.round(dsc, 4))
         seg_metrics["nsd"].append(np.round(nsd, 4))
 
+        target = seg_file.name.split("_")[1]
+        if target not in dsc_by_target:
+            dsc_by_target[target] = []
+            nsd_by_target[target] = []
+        
+        dsc_by_target[target].append(dsc)
+        nsd_by_target[target].append(nsd)
+        
+    # save segmentation metrics by case
     dsc_np = np.array(seg_metrics["dsc"])
     nsd_np = np.array(seg_metrics["nsd"])
     avg_dsc = np.mean(dsc_np[~np.isnan(dsc_np)])
@@ -101,8 +116,38 @@ if __name__ == '__main__':
     seg_metrics["dsc"].append(avg_dsc)
     seg_metrics["nsd"].append(avg_nsd)
 
+    # save segmentation metrics by target
+    seg_metrics_by_target = OrderedDict()
+    seg_metrics_by_target["target"] = []
+    seg_metrics_by_target["dsc"] = []
+    seg_metrics_by_target["nsd"] = []
+
+    for target in dsc_by_target:
+        dsc_by_target_np = np.array(dsc_by_target[target])
+        nsd_by_target_np = np.array(nsd_by_target[target])
+        avg_dsc_by_target = np.mean(dsc_by_target_np[~np.isnan(dsc_by_target_np)])
+        avg_nsd_by_target = np.mean(nsd_by_target_np[~np.isnan(nsd_by_target_np)])
+        
+        seg_metrics_by_target["target"].append(target)
+        seg_metrics_by_target["dsc"].append(np.round(avg_dsc_by_target, 4))
+        seg_metrics_by_target["nsd"].append(np.round(avg_nsd_by_target, 4))
+
+    seg_metrics_by_target["target"].append("average")
+    seg_metrics_by_target["dsc"].append(avg_dsc)
+    seg_metrics_by_target["nsd"].append(avg_nsd)
+
+    # export to CSV
     df = pd.DataFrame(seg_metrics)
     df.to_csv(output_csv, index=False, na_rep="NaN")
+
+    df_by_target = pd.DataFrame(seg_metrics_by_target)
+    df_by_target.to_csv(output_by_target_csv, index=False, na_rep="NaN")
+
+    for idx, target in enumerate(seg_metrics_by_target["target"]):
+        if target == "average":
+            continue
+
+        print(f"Target: {target}, DSC: {seg_metrics_by_target['dsc'][idx]}, NSD: {seg_metrics_by_target['nsd'][idx]}")
 
     print("Average DSC: {:.4f}".format(avg_dsc))
     print("Average NSD: {:.4f}".format(avg_nsd))

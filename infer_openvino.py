@@ -188,8 +188,9 @@ def postprocess_masks(masks, new_size, original_size):
 
     return masks
 
-encoder_path = "./openvino_models/rep_medsam/encoder.xml"
-decoder_path = "./openvino_models/rep_medsam/decoder.xml"
+model_dir = "./openvino_models/lite_medsam_default/"
+encoder_path = model_dir + "encoder.xml"
+decoder_path = model_dir + "decoder.xml"
 
 encoder_compiled, decoder_compiled = load_models(encoder_path, decoder_path)
 
@@ -250,7 +251,7 @@ def load_and_process_image(img_npz_file: str):
                                       new_size=img_256.shape[:2], original_size=(H, W))
 
     np.savez_compressed(
-        join("./output/rep_medsam/segs/", basename(img_npz_file)),
+        join("./output/lite_medsam_default/segs/", basename(img_npz_file)),
         segs=segs,
     )
 

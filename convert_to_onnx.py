@@ -166,10 +166,10 @@ def convert_to_openvino(onnx_model: Path):
     model = ov.convert_model(onnx_model)
     ov.save_model(model, onnx_model.with_suffix(".xml"), compress_to_fp16=False)
 
-def export_encoder(sam_model: MedSAM_Lite, export_optimized: bool = False, export_quantized: bool = False):
+def export_encoder(sam_model: MedSAM_Lite, export_optimized: bool = False, export_quantized: bool = False, output_dir: Path = None):
     dummy_inputs = torch.randn((1, 3, 256, 256,), dtype = torch.float32)
 
-    output_file = Path("./new_model") / "encoder.onnx"
+    output_file = output_dir / "encoder.onnx"
 
     buffer = io.BytesIO()
     torch.onnx.export(
@@ -218,7 +218,7 @@ def export_encoder(sam_model: MedSAM_Lite, export_optimized: bool = False, expor
 
         convert_to_openvino(quantized_output_file)
 
-def export_decoder(sam_model: MedSAM_Lite, export_optimized: bool = False, export_quantized: bool = False):
+def export_decoder(sam_model: MedSAM_Lite, export_optimized: bool = False, export_quantized: bool = False, output_dir: Path = None):
     onnx_model = DecoderOnnxModel(
         mask_decoder=sam_model.mask_decoder,
         prompt_encoder=sam_model.prompt_encoder,
@@ -233,7 +233,7 @@ def export_decoder(sam_model: MedSAM_Lite, export_optimized: bool = False, expor
     }
     output_names = ["masks"]
 
-    output_file = Path("./new_model") / "decoder.onnx"
+    output_file = output_dir / "decoder.onnx"
 
     buffer = io.BytesIO()
     torch.onnx.export(
@@ -286,12 +286,16 @@ def export_decoder(sam_model: MedSAM_Lite, export_optimized: bool = False, expor
         convert_to_openvino(quantized_output_file)
 
 if __name__ == '__main__':
-    # print("Exporting encoder...")
-    # export_encoder(medsam_lite_model,
-    #                export_optimized=False,
-    #                export_quantized=False)
+    onnx_output_dir = Path("./openvino_models/lite_medsam_default")
+
+    print("Exporting encoder...")
+    export_encoder(medsam_lite_model,
+                   export_optimized=False,
+                   export_quantized=False,
+                   output_dir=onnx_output_dir)
 
     print("Exporting decoder...")
     export_decoder(medsam_lite_model,
                    export_optimized=False,
-                   export_quantized=False)
+                   export_quantized=False,
+                   output_dir=onnx_output_dir)
