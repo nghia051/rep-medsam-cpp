@@ -259,14 +259,6 @@ void infer_2d(std::string img_file, std::string seg_file, Encoder &encoder, Deco
     
     std::remove(seg_file.c_str());
     xt::dump_npz(seg_file, "segs", segs, false);
-    
-    // std::ofstream out1(seg_file + ".bin", std::ios::binary);
-    // out1.write(reinterpret_cast<const char*>(input_tensor.data()), input_tensor.get_byte_size());
-    // out1.close();
-
-    // std::ofstream out(seg_file + ".seg", std::ios::binary);
-    // out.write(reinterpret_cast<const char*>(segs.data()), segs.size() * sizeof(uint8_t));
-    // out.close();
 }
 
 bool starts_with(const std::string &str, const std::string &prefix)
