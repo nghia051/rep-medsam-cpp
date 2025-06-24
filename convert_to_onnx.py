@@ -289,9 +289,9 @@ if __name__ == '__main__':
     # print("Exporting encoder...")
     # export_encoder(medsam_lite_model,
     #                export_optimized=False,
-    #                export_quantized=True)
+    #                export_quantized=False)
 
     print("Exporting decoder...")
     export_decoder(medsam_lite_model,
                    export_optimized=False,
-                   export_quantized=True)
+                   export_quantized=False)

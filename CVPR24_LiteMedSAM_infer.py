@@ -542,21 +542,25 @@ def MedSAM_infer_npz_3D(img_npz_file):
 
 
 if __name__ == '__main__':
-    img_npz_files = sorted(glob(join(data_root, '*.npz'), recursive=True))
+    img_npz_files = sorted(glob(join("./dataset/imgs/", '*.npz'), recursive=True))
     efficiency = OrderedDict()
     efficiency['case'] = []
     efficiency['time'] = []
+    count = 0
     for img_npz_file in tqdm(img_npz_files):
         start_time = time()
         if basename(img_npz_file).startswith('3D'):
             MedSAM_infer_npz_3D(img_npz_file)
         else:
             MedSAM_infer_npz_2D(img_npz_file)
+        count += 1
         end_time = time()
         efficiency['case'].append(basename(img_npz_file))
         efficiency['time'].append(end_time - start_time)
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(current_time, 'file name:', basename(img_npz_file), 'time cost:', np.round(end_time - start_time, 4))
+        if count >= 10:
+            break
 
     efficiency_df = pd.DataFrame(efficiency)
     efficiency_df.to_csv(join(pred_save_dir, 'efficiency.csv'), index=False)
