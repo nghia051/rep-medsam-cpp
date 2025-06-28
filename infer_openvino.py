@@ -188,9 +188,9 @@ def postprocess_masks(masks, new_size, original_size):
 
     return masks
 
-model_dir = "./openvino_models/lite_medsam_default/"
-encoder_path = model_dir + "encoder.xml"
-decoder_path = model_dir + "decoder.xml"
+model_name = "rep_medsam"
+encoder_path = "./openvino_models/" + model_name + "/encoder.xml"
+decoder_path = "./openvino_models/" + model_name + "/decoder.xml"
 
 encoder_compiled, decoder_compiled = load_models(encoder_path, decoder_path)
 
@@ -201,22 +201,28 @@ def compute_image_embeddings(img_256_tensor):
 
     return image_embeddings_tensor
 
-def compute_segmentation_masks(image_embeddings_tensor, boxes_tensor, new_size, original_size):
-    segs = np.zeros(original_size, dtype=np.uint8)
-    low_res_logits = decoder_compiled([image_embeddings_tensor, boxes_tensor])["masks"]
-    low_res_logits = torch.from_numpy(low_res_logits)
+def compute_segmentation_masks(image_embeddings_tensor, boxes, new_size, original_size):
+    segs = np.zeros(original_size, dtype=np.uint16)
+    
+    for idx in range(len(boxes)):
+        box256 = resize_box_to_256(boxes[idx], original_size)
+        box256 = box256[None, ...] # (1, 4)
 
-    low_res_pred = postprocess_masks(low_res_logits, new_size, original_size)
-    low_res_pred = torch.sigmoid(low_res_pred)
-    low_res_pred = low_res_pred.squeeze(1).cpu().numpy()
-    medsam_seg = (low_res_pred > 0.5).astype(np.uint8)
+        box_tensor = torch.tensor(box256, dtype=torch.float32, device="cpu")  # shape [1, 4]
 
-    for idx in range(len(boxes_tensor)):
-        segs[medsam_seg[idx] > 0] = idx + 1
+        low_res_logits = decoder_compiled([image_embeddings_tensor, box_tensor])["masks"]
+        low_res_logits = torch.from_numpy(low_res_logits)
+
+        low_res_pred = postprocess_masks(low_res_logits, new_size, original_size)
+        low_res_pred = torch.sigmoid(low_res_pred)
+        low_res_pred = low_res_pred.squeeze().cpu().numpy()
+        medsam_seg = (low_res_pred > 0.5).astype(np.uint8)
+
+        segs[medsam_seg > 0] = idx + 1        
 
     return segs
 
-def load_and_process_image(img_npz_file: str):
+def infer_2D(img_npz_file: str):
     npz_data = np.load(img_npz_file, 'r', allow_pickle=True)
     img_3c = npz_data['imgs'] # (H, W, 3)
     assert np.max(img_3c)<256, f'input data should be in range [0, 255], but got {np.unique(img_3c)}'
@@ -225,7 +231,8 @@ def load_and_process_image(img_npz_file: str):
     boxes = npz_data['boxes'].to_device("cpu")
     
     # preprocess image
-    img_256 = resize_longest_side(img_3c, 256)
+    img_256 = resize_longest_side(img_3c, target_length=256)
+    newh, neww = img_256.shape[:2]
 
     img_256_norm = (img_256 - img_256.min()) / np.clip(
         img_256.max() - img_256.min(), a_min=1e-8, a_max=None
@@ -240,23 +247,16 @@ def load_and_process_image(img_npz_file: str):
 
     image_embeddings_tensor = compute_image_embeddings(img_256_tensor)  # shape [1, 256, 64, 64]
 
-    boxes_256 = np.empty((0, 4), dtype=np.float32)  # Initialize an empty array for boxes in 256x256 space
-    for box in boxes:
-        box256 = resize_box_to_256(box, original_size=(H, W))
-        boxes_256 = np.vstack((boxes_256, box256))  # Append the resized box to the array
-     
-    boxes_tensor = torch.tensor(boxes_256, dtype=torch.float32).to("cpu")  # shape [B, 4]
-    
-    segs = compute_segmentation_masks(image_embeddings_tensor, boxes_tensor,
-                                      new_size=img_256.shape[:2], original_size=(H, W))
+    segs = compute_segmentation_masks(image_embeddings_tensor, boxes,
+                                      new_size=(newh, neww), original_size=(H, W))
 
     np.savez_compressed(
-        join("./output/lite_medsam_default/segs/", basename(img_npz_file)),
+        join("./output/" + model_name + "/segs/", basename(img_npz_file)),
         segs=segs,
     )
 
     # save overlay
-    # save_overlay_image(img_3c, segs, boxes, join("./rep_medsam_output/overlay", basename(img_npz_file).replace('.npz', '.png')))
+    # save_overlay_image(img_3c, segs, boxes, join("./output/" + model_name + "/overlay/", basename(img_npz_file).replace('.npz', '.png')))
 
 if __name__ == '__main__':
     img_npz_files = sorted(glob(join("./dataset/imgs/", '*.npz'), recursive=True))
@@ -264,11 +264,8 @@ if __name__ == '__main__':
     print(f"Found {len(img_npz_files)} image files to process.")
 
     for img_npz_file in tqdm(img_npz_files):
-        if "Microscope" in basename(img_npz_file):
-            continue
- 
         if basename(img_npz_file).startswith('2D'):
             start_time = time()
-            load_and_process_image(img_npz_file)
+            infer_2D(img_npz_file)
             end_time = time()
             print('file name:', basename(img_npz_file), 'time cost:', np.round(end_time - start_time, 4))

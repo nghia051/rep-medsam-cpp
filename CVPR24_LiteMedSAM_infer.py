@@ -38,7 +38,7 @@ parser.add_argument(
     '-o',
     '--output_dir',
     type=str,
-    default='test_demo/segs/',
+    default='./output/lite_medsam_python/segs',
     help='directory to save the prediction',
 )
 parser.add_argument(
@@ -61,7 +61,7 @@ parser.add_argument(
 )
 parser.add_argument(
     '--save_overlay',
-    default=True,
+    default=False,
     action='store_true',
     help='whether to save the overlay image'
 )
@@ -546,21 +546,19 @@ if __name__ == '__main__':
     efficiency = OrderedDict()
     efficiency['case'] = []
     efficiency['time'] = []
-    count = 0
-    for img_npz_file in tqdm(img_npz_files):
+    for img_npz_file in tqdm(img_npz_files[1785:]):
         start_time = time()
         if basename(img_npz_file).startswith('3D'):
             MedSAM_infer_npz_3D(img_npz_file)
         else:
             MedSAM_infer_npz_2D(img_npz_file)
-        count += 1
+        
         end_time = time()
         efficiency['case'].append(basename(img_npz_file))
         efficiency['time'].append(end_time - start_time)
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(current_time, 'file name:', basename(img_npz_file), 'time cost:', np.round(end_time - start_time, 4))
-        if count >= 10:
-            break
+
 
     efficiency_df = pd.DataFrame(efficiency)
     efficiency_df.to_csv(join(pred_save_dir, 'efficiency.csv'), index=False)
