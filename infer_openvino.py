@@ -188,7 +188,7 @@ def postprocess_masks(masks, new_size, original_size):
 
     return masks
 
-model_name = "rep_medsam"
+model_name = "rep_medsam_fixed"
 encoder_path = "./openvino_models/" + model_name + "/encoder.xml"
 decoder_path = "./openvino_models/" + model_name + "/decoder.xml"
 
