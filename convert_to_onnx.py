@@ -167,7 +167,7 @@ def convert_to_openvino(onnx_model: Path):
     ov.save_model(model, onnx_model.with_suffix(".xml"), compress_to_fp16=False)
 
 def export_encoder(sam_model: MedSAM_Lite, export_optimized: bool = False, export_quantized: bool = False, output_dir: Path = None):
-    dummy_inputs = torch.randn((1, 3, 256, 256,), dtype = torch.float32)
+    dummy_inputs = torch.randn((1, 3, 256, 256), dtype = torch.float32)
 
     output_file = output_dir / "encoder.onnx"
 
