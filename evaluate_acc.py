@@ -54,8 +54,8 @@ def compute_multi_class_nsd(gt, seg, spacing, tolerance=2.0):
 
 if __name__ == '__main__':
     gt_path = "./dataset/gts/"
-
-    base_output_path = "./output/rep_medsam_fixed/"
+ 
+    base_output_path = "./output/rep_medsam_preprocessed_cpp/"
     seg_path = base_output_path + "segs/"
     output_csv = base_output_path + "seg_metrics.csv"
     output_by_target_csv = base_output_path + "seg_metrics_by_target.csv"

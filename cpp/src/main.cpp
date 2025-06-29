@@ -26,7 +26,7 @@ using ImageSize = std::array<size_t, 2>;
 
 constexpr size_t EMBEDDINGS_CACHE_SIZE = 1024;
 constexpr size_t IMAGE_ENCODER_INPUT_SIZE = 256;
-const ov::Shape INPUT_SHAPE = {1, 3, IMAGE_ENCODER_INPUT_SIZE, IMAGE_ENCODER_INPUT_SIZE};
+const ov::Shape INPUT_SHAPE = {IMAGE_ENCODER_INPUT_SIZE, IMAGE_ENCODER_INPUT_SIZE, 3};
 
 std::array<size_t, 2> get_preprocess_shape(size_t oldh, size_t oldw)
 {
@@ -108,31 +108,16 @@ struct Encoder
         return infer_request.get_output_tensor();
     }
 
-    xt::xtensor<float, 4> preprocess_2D(xt::xtensor<uint8_t, 3> &original_img)
+    xt::xtensor<float, 3> preprocess_2D(xt::xtensor<uint8_t, 3> &original_img)
     {
         assert(original_img.shape()[0] == 3);
         cv::Mat mat1(cv::Size(original_size[1], original_size[0]), CV_8UC3, original_img.data()), mat2;
         cv::resize(mat1, mat2, cv::Size(new_size[1], new_size[0]), cv::INTER_LINEAR);
 
-        xt::xtensor<float, 3> img = xt::adapt((uint8_t *)mat2.data, mat2.total() * mat2.channels(), xt::no_ownership(), std::vector<int>{mat2.rows, mat2.cols, mat2.channels()});
-        img = (img - xt::amin(img)()) / std::max(xt::amax(img)() - xt::amin(img)(), 1e-8f);
+        xt::xtensor<float, 3> img = xt::adapt((uint8_t*)mat2.data, mat2.total() * mat2.channels(), xt::no_ownership(), std::vector<int>{mat2.rows, mat2.cols, mat2.channels()});
+        img = (img - xt::amin(img)()) / std::clamp(xt::amax(img)() - xt::amin(img)(), 1e-8f, 1e18f);
 
-        xt::xtensor<float, 3> padded = xt::pad(img, {{0, IMAGE_ENCODER_INPUT_SIZE - new_size[0]}, {0, IMAGE_ENCODER_INPUT_SIZE - new_size[1]}, {0, 0}});
-
-        xt::xtensor<float, 4> result = xt::zeros<float>(INPUT_SHAPE);
-
-        for (size_t h = 0; h < IMAGE_ENCODER_INPUT_SIZE; ++h)
-        {
-            for (size_t w = 0; w < IMAGE_ENCODER_INPUT_SIZE; ++w)
-            {
-                for (size_t c = 0; c < 3; ++c)
-                {
-                    result(0, c, h, w) = padded(h, w, c);
-                }
-            }
-        }
-
-        return result;
+        return xt::pad(img, {{0, IMAGE_ENCODER_INPUT_SIZE - new_size[0]}, {0, IMAGE_ENCODER_INPUT_SIZE - new_size[1]}, {0, 0}});
     }
 };
 
@@ -198,27 +183,17 @@ struct Decoder
         return new_masks;
     }
 
-    xt::xtensor<uint8_t, 2> decode_mask(const ov::Tensor &boxes_tensor)
+    xt::xtensor<float, 2> decode_mask(const ov::Tensor& box_tensor)
     {
-        infer_request.set_input_tensor(1, boxes_tensor);
+        infer_request.set_input_tensor(1, box_tensor);
         infer_request.infer();
 
-        ov::Tensor masks_tensor = infer_request.get_output_tensor();
+        xt::xtensor<float, 2> mask = xt::adapt(infer_request.get_output_tensor().data<float>(), IMAGE_ENCODER_INPUT_SIZE * IMAGE_ENCODER_INPUT_SIZE, xt::no_ownership(), std::vector<int>{IMAGE_ENCODER_INPUT_SIZE, IMAGE_ENCODER_INPUT_SIZE});
+        mask = xt::view(mask, xt::range(_, new_size[0]), xt::range(_, new_size[1]));
 
-        auto low_res_pred = postprocess_masks(masks_tensor);
-        low_res_pred = 1.0 / (1.0 + xt::exp(-low_res_pred));
-
-        xt::xtensor<uint8_t, 4> medsam_seg = xt::where(low_res_pred > 0.5f, 1.0, 0.0);
-
-        xt::xtensor<uint8_t, 2> segs = xt::zeros<uint8_t>({original_size[0], original_size[1]});
-
-        for (int idx = 0; idx < medsam_seg.shape()[0]; ++idx)
-        {
-            auto mask = xt::view(medsam_seg, idx, 0, xt::all(), xt::all());
-            xt::filtration(segs, mask > 0) = idx + 1;
-        }
-
-        return segs;
+        cv::Mat mat1(cv::Size(new_size[1], new_size[0]), CV_32FC1, mask.data()), mat2;
+        cv::resize(mat1, mat2, cv::Size(original_size[1], original_size[0]), cv::INTER_LINEAR);
+        return xt::adapt((float*)mat2.data, mat2.total(), xt::no_ownership(), std::vector<int>{mat2.rows, mat2.cols});
     }
 };
 
@@ -242,23 +217,23 @@ void infer_2d(std::string img_file, std::string seg_file, Encoder &encoder, Deco
 
     ov::Tensor embedding_tensor = encoder.encode_image(input_tensor);
 
+    xt::xtensor<uint16_t, 2> segs = xt::zeros<uint16_t>({original_size[0], original_size[1]});
+
     decoder.set_embedding_tensor(embedding_tensor);
-    for (size_t i = 0; i < boxes.shape()[0]; ++i)
+    for (int i = 0; i < boxes.shape()[0]; ++i)
     {
         for (size_t j = 0; j < boxes.shape()[1]; ++j)
         {
-            boxes(i, j) *= ratio;
+            boxes(i, j) *= ratio; // Scale the box coordinates
             boxes(i, j) = int(boxes(i, j));
         }
+
+        ov::Tensor box_tensor(ov::element::f32, {1, 4}, boxes.data() + i * 4);
+        auto mask = decoder.decode_mask(box_tensor);
+        xt::filtration(segs, mask > 0) = i + 1;
     }
-    ov::Tensor boxes_ov_tensor(
-        ov::element::f32,
-        {static_cast<size_t>(boxes.shape()[0]), boxes.shape()[1]},
-        boxes.data());
-    auto segs = decoder.decode_mask(boxes_ov_tensor);
-    
-    std::remove(seg_file.c_str());
-    xt::dump_npz(seg_file, "segs", segs, false);
+
+    xt::dump_npz(seg_file, "segs", segs, true);
 }
 
 bool starts_with(const std::string &str, const std::string &prefix)
@@ -304,6 +279,8 @@ int main(int argc, char **argv)
         throw std::runtime_error(segs_folder.string() + " is not a folder");
     }
 
+    std::chrono::milliseconds sum_duration(0);
+
     for (const auto &entry : std::filesystem::directory_iterator(imgs_folder))
     {
         if (!entry.is_regular_file())
@@ -312,6 +289,8 @@ int main(int argc, char **argv)
         }
 
         auto base_name = entry.path().filename().string();
+        // if (std::string(base_name) == "2DBox_CT_0110.npz") break;
+        
         if (ends_with(base_name, ".npz"))
         {
             auto img_file = entry.path().string();
@@ -328,8 +307,11 @@ int main(int argc, char **argv)
             }
             auto infer_finish = std::chrono::high_resolution_clock::now();
             std::cout << "Inferred " << base_name << " in " << std::chrono::duration_cast<std::chrono::milliseconds>(infer_finish - infer_start).count() << "ms\n";
+            sum_duration += std::chrono::duration_cast<std::chrono::milliseconds>(infer_finish - infer_start);
         }
     }
+
+    std::cout << "Total time: " << sum_duration.count() << "ms\n";
 
     return 0;
 }

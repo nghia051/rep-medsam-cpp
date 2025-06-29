@@ -262,9 +262,13 @@ if __name__ == '__main__':
 
     print(f"Found {len(img_npz_files)} image files to process.")
 
+    sum = 0
     for img_npz_file in tqdm(img_npz_files):
         if basename(img_npz_file).startswith('2D'):
             start_time = time()
             infer_2D(img_npz_file)
             end_time = time()
             print('file name:', basename(img_npz_file), 'time cost:', np.round(end_time - start_time, 4))
+            sum += end_time - start_time
+
+    print(f"Total time for processing: {np.round(sum, 10)} seconds")

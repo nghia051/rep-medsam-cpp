@@ -2,3 +2,11 @@
 cmake -S . -B build -D CMAKE_BUILD_TYPE=Release
 cmake --build build --verbose -j$(nproc)
 ```
+
+```
+./build/main ../openvino_models/rep_medsam_preprocessed/encoder.xml ../openvino_models/rep_medsam_preprocessed/decoder.xml ../output/rep_medsam_preprocessed_cpp/cache ../dataset/imgs ../output/rep_medsam_preprocessed_cpp/segs
+```
+
+```
+Total time: 1647071ms
+```
