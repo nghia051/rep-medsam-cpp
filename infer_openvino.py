@@ -1,5 +1,4 @@
 from openvino.runtime import Core
-from PIL import Image
 from os.path import join, basename
 from glob import glob
 from tqdm import tqdm
