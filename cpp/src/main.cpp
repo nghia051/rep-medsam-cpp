@@ -144,45 +144,6 @@ struct Decoder
         infer_request.set_input_tensor(0, embedding_tensor);
     }
 
-    xt::xtensor<float, 4> postprocess_masks(const ov::Tensor &masks)
-    {
-        auto shape = masks.get_shape();
-        size_t B = shape[0]; // Số batch
-        size_t H = shape[2]; // Chiều cao ban đầu
-        size_t W = shape[3]; // Chiều rộng ban đầu
-
-        const float *data_ptr = static_cast<const float *>(masks.data());
-
-        xt::xtensor<float, 4> new_masks = xt::empty<float>(
-            {B, 1ul, original_size[0], original_size[1]});
-
-        // Xử lý từng batch
-        for (size_t b = 0; b < B; ++b)
-        {
-            cv::Mat original_mask(static_cast<int>(H), static_cast<int>(W), CV_32F,
-                                  const_cast<float *>(data_ptr + b * H * W));
-
-            // Cắt mask theo new_size (chiều cao = new_size[0], chiều rộng = new_size[1])
-            cv::Mat cropped_mask = original_mask(cv::Rect(0, 0, static_cast<int>(new_size[1]), static_cast<int>(new_size[0])));
-
-            // Tạo ma trận đích để chứa mask sau khi thay đổi kích thước
-            cv::Mat resized_mask(static_cast<int>(original_size[0]), static_cast<int>(original_size[1]), CV_32F);
-
-            // Thay đổi kích thước về original_size bằng nội suy song tuyến tính
-            cv::resize(cropped_mask, resized_mask,
-                       cv::Size(static_cast<int>(original_size[1]), static_cast<int>(original_size[0])),
-                       0, 0, cv::INTER_LINEAR);
-
-            // Chuyển cv::Mat đã thay đổi kích thước về xtensor và gán vào tensor đầu ra
-            auto resized_xt = xt::adapt(reinterpret_cast<float *>(resized_mask.data),
-                                        original_size,
-                                        xt::layout_type::row_major);
-            xt::view(new_masks, b, 0, xt::all(), xt::all()) = resized_xt;
-        }
-
-        return new_masks;
-    }
-
     xt::xtensor<float, 2> decode_mask(const ov::Tensor& box_tensor)
     {
         infer_request.set_input_tensor(1, box_tensor);
@@ -215,7 +176,10 @@ void infer_2d(std::string img_file, std::string seg_file, Encoder &encoder, Deco
     auto img = encoder.preprocess_2D(original_img);
     ov::Tensor input_tensor(ov::element::f32, INPUT_SHAPE, img.data());
 
+    // auto encoder_start = std::chrono::high_resolution_clock::now();
     ov::Tensor embedding_tensor = encoder.encode_image(input_tensor);
+    // auto encoder_finish = std::chrono::high_resolution_clock::now();
+    // std::cout << "Encoded image in " << std::chrono::duration_cast<std::chrono::milliseconds>(encoder_finish - encoder_start).count() << "ms\n";
 
     xt::xtensor<uint16_t, 2> segs = xt::zeros<uint16_t>({original_size[0], original_size[1]});
 
@@ -229,7 +193,12 @@ void infer_2d(std::string img_file, std::string seg_file, Encoder &encoder, Deco
         }
 
         ov::Tensor box_tensor(ov::element::f32, {1, 4}, boxes.data() + i * 4);
+        
+        // auto decoder_start = std::chrono::high_resolution_clock::now();
         auto mask = decoder.decode_mask(box_tensor);
+        // auto decoder_finish = std::chrono::high_resolution_clock::now();
+        // std::cout << "Decoded box " << (i + 1) << " in " << std::chrono::duration_cast<std::chrono::milliseconds>(decoder_finish - decoder_start).count() << "ms\n";
+        
         xt::filtration(segs, mask > 0) = i + 1;
     }
 

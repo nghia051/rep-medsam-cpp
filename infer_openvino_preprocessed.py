@@ -1,4 +1,4 @@
-from openvino.runtime import Core
+from openvino import Core, Type
 from os.path import join, basename
 from glob import glob
 from tqdm import tqdm
@@ -13,10 +13,18 @@ import cv2
 #%% set seeds
 torch.set_float32_matmul_precision('high')
 torch.manual_seed(2024)
-torch.cuda.manual_seed(2024)
 np.random.seed(2024)
 
+model_name = "rep_medsam_preprocessed"
+
 core = Core()
+core.set_property("CPU", {
+    "INFERENCE_PRECISION_HINT": Type.f32,
+    "EXECUTION_MODE_HINT": "ACCURACY",         # can also be "PERFORMANCE"
+    "PERFORMANCE_HINT": "LATENCY",             # or "THROUGHPUT"
+    "NUM_STREAMS": "1",
+    "CACHE_DIR": "./output/" + model_name + "/cache"
+})
 
 def load_encoder(model_path: str):
     """
@@ -187,7 +195,6 @@ def postprocess_masks(masks, new_size, original_size):
 
     return masks
 
-model_name = "rep_medsam_test"
 encoder_path = "./openvino_models/" + model_name + "/encoder.xml"
 decoder_path = "./openvino_models/" + model_name + "/decoder.xml"
 
@@ -255,17 +262,15 @@ def infer_2D(img_npz_file: str):
     )
 
     # save overlay
-    save_overlay_image(img_3c, segs, boxes, join("./output/" + model_name + "/overlay/", basename(img_npz_file).replace('.npz', '.png')))
+    # save_overlay_image(img_3c, segs, boxes, join("./output/" + model_name + "/overlay/", basename(img_npz_file).replace('.npz', '.png')))
 
 if __name__ == '__main__':
-    img_npz_files = sorted(glob(join("./dataset/imgs/", '*.npz'), recursive=True))
+    img_npz_files = sorted(glob(join("./dataset_selected/imgs/", '*.npz'), recursive=True))
 
     print(f"Found {len(img_npz_files)} image files to process.")
 
     sum = 0
-    for img_npz_file in tqdm(img_npz_files[:10]):
-        if basename(img_npz_file) == '2DBox_CT_0110.npz':
-            break
+    for img_npz_file in tqdm(img_npz_files):
         if basename(img_npz_file).startswith('2D'):
             start_time = time()
             infer_2D(img_npz_file)

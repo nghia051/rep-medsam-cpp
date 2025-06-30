@@ -9,4 +9,10 @@ cmake --build build --verbose -j$(nproc)
 
 ```
 Total time: 1647071ms
+
+Total time: 363279ms
+Total time for processing: 362.7365744114 seconds
 ```
+
+./build/main ../openvino_models/rep_medsam_preprocessed/encoder.xml ../openvino_models/rep_medsam_preprocessed/decoder.xml ../output/rep_medsam_preprocessed_selected_cpp/cache ../dataset_selected/imgs ../output/rep_medsam_preprocessed_selected_cpp/segs
+
