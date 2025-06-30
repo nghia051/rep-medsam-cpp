@@ -114,7 +114,7 @@ struct Encoder
         cv::Mat mat1(cv::Size(original_size[1], original_size[0]), CV_8UC3, original_img.data()), mat2;
         cv::resize(mat1, mat2, cv::Size(new_size[1], new_size[0]), cv::INTER_LINEAR);
 
-        xt::xtensor<float, 3> img = xt::adapt((uint8_t *)mat2.data, mat2.total() * mat2.channels(), xt::no_ownership(), std::vector<int>{mat2.rows, mat2.cols, mat2.channels()});
+        xt::xtensor<float, 3> img = xt::adapt((uint8_t*)mat2.data, mat2.total() * mat2.channels(), xt::no_ownership(), std::vector<int>{mat2.rows, mat2.cols, mat2.channels()});
         img = (img - xt::amin(img)()) / std::max(xt::amax(img)() - xt::amin(img)(), 1e-8f);
 
         xt::xtensor<float, 3> padded = xt::pad(img, {{0, IMAGE_ENCODER_INPUT_SIZE - new_size[0]}, {0, IMAGE_ENCODER_INPUT_SIZE - new_size[1]}, {0, 0}});
@@ -136,6 +136,7 @@ struct Encoder
     }
 };
 
+double time_decode_infer = 0;
 struct Decoder
 {
     ov::CompiledModel model;
@@ -159,66 +160,67 @@ struct Decoder
         infer_request.set_input_tensor(0, embedding_tensor);
     }
 
-    xt::xtensor<float, 4> postprocess_masks(const ov::Tensor &masks)
-    {
-        auto shape = masks.get_shape();
-        size_t B = shape[0]; // Số batch
-        size_t H = shape[2]; // Chiều cao ban đầu
-        size_t W = shape[3]; // Chiều rộng ban đầu
+    // xt::xtensor<float, 2> postprocess_masks(ov::Tensor &&masks)
+    // {
+    //     auto shape = masks.get_shape();
+    //     size_t H = shape[2]; // Chiều cao ban đầu
+    //     size_t W = shape[3]; // Chiều rộng ban đầu
 
-        const float *data_ptr = static_cast<const float *>(masks.data());
+    //     // Xử lý mask
+    //     cv::Mat original_mask(static_cast<int>(H), static_cast<int>(W), CV_32F, masks.data<float>());
 
-        xt::xtensor<float, 4> new_masks = xt::empty<float>(
-            {B, 1ul, original_size[0], original_size[1]});
+    //     // Cắt mask theo new_size (chiều cao = new_size[0], chiều rộng = new_size[1])
+    //     cv::Mat cropped_mask = original_mask(cv::Rect(0, 0, static_cast<int>(new_size[1]), static_cast<int>(new_size[0])));
+        
+    //     // Tạo ma trận đích để chứa mask sau khi thay đổi kích thước
+    //     cv::Mat resized_mask(static_cast<int>(original_size[0]), static_cast<int>(original_size[1]), CV_32F);
+        
+    //     // Thay đổi kích thước về original_size bằng nội suy song tuyến tính
+    //     cv::resize(cropped_mask, resized_mask,
+    //             cv::Size(static_cast<int>(original_size[1]), static_cast<int>(original_size[0])),
+    //             0, 0, cv::INTER_LINEAR);
 
-        // Xử lý từng batch
-        for (size_t b = 0; b < B; ++b)
-        {
-            cv::Mat original_mask(static_cast<int>(H), static_cast<int>(W), CV_32F,
-                                  const_cast<float *>(data_ptr + b * H * W));
+    //     // Chuyển cv::Mat đã thay đổi kích thước về xtensor và gán vào tensor đầu ra
+    //     return xt::adapt((float*)(resized_mask.data),
+    //                                 original_size,
+    //                                 xt::layout_type::row_major);
+    // }
 
-            // Cắt mask theo new_size (chiều cao = new_size[0], chiều rộng = new_size[1])
-            cv::Mat cropped_mask = original_mask(cv::Rect(0, 0, static_cast<int>(new_size[1]), static_cast<int>(new_size[0])));
+    // void decode_mask(const ov::Tensor& box_tensor, xt::xtensor<uint16_t, 2>& segs, size_t idx)
+    // {
+    //     auto infer_start = std::chrono::high_resolution_clock::now();
 
-            // Tạo ma trận đích để chứa mask sau khi thay đổi kích thước
-            cv::Mat resized_mask(static_cast<int>(original_size[0]), static_cast<int>(original_size[1]), CV_32F);
+    //     infer_request.set_input_tensor(1, box_tensor);
+    //     infer_request.infer();
 
-            // Thay đổi kích thước về original_size bằng nội suy song tuyến tính
-            cv::resize(cropped_mask, resized_mask,
-                       cv::Size(static_cast<int>(original_size[1]), static_cast<int>(original_size[0])),
-                       0, 0, cv::INTER_LINEAR);
+    //     auto infer_finish = std::chrono::high_resolution_clock::now();
+    //     time_decode_infer += std::chrono::duration_cast<std::chrono::milliseconds>(infer_finish - infer_start).count();    
 
-            // Chuyển cv::Mat đã thay đổi kích thước về xtensor và gán vào tensor đầu ra
-            auto resized_xt = xt::adapt(reinterpret_cast<float *>(resized_mask.data),
-                                        original_size,
-                                        xt::layout_type::row_major);
-            xt::view(new_masks, b, 0, xt::all(), xt::all()) = resized_xt;
-        }
+    //     infer_start = std::chrono::high_resolution_clock::now();
 
-        return new_masks;
-    }
+    //     auto low_res_pred = postprocess_masks(std::move(infer_request.get_output_tensor()));
 
-    xt::xtensor<uint8_t, 2> decode_mask(const ov::Tensor &boxes_tensor)
-    {
-        infer_request.set_input_tensor(1, boxes_tensor);
+    //     xt::filtration(segs, low_res_pred > 0.0f) = idx + 1;
+
+    //     infer_finish = std::chrono::high_resolution_clock::now();
+    //     time_encode_infer += std::chrono::duration_cast<std::chrono::milliseconds>(infer_finish - infer_start).count();    
+    // }
+    xt::xtensor<float, 2> decode_mask(const ov::Tensor& box_tensor) {
+        auto infer_start = std::chrono::high_resolution_clock::now();
+
+        infer_request.set_input_tensor(1, box_tensor);
         infer_request.infer();
 
-        ov::Tensor masks_tensor = infer_request.get_output_tensor();
+        xt::xtensor<float, 2> mask = xt::adapt(infer_request.get_output_tensor().data<float>(), IMAGE_ENCODER_INPUT_SIZE * IMAGE_ENCODER_INPUT_SIZE, xt::no_ownership(), std::vector<int>{IMAGE_ENCODER_INPUT_SIZE, IMAGE_ENCODER_INPUT_SIZE});
+        mask = xt::view(mask, xt::range(_, new_size[0]), xt::range(_, new_size[1]));
 
-        auto low_res_pred = postprocess_masks(masks_tensor);
-        low_res_pred = 1.0 / (1.0 + xt::exp(-low_res_pred));
+        cv::Mat mat1(cv::Size(new_size[1], new_size[0]), CV_32FC1, mask.data()), mat2;
+        cv::resize(mat1, mat2, cv::Size(original_size[1], original_size[0]), cv::INTER_LINEAR);
 
-        xt::xtensor<uint8_t, 4> medsam_seg = xt::where(low_res_pred > 0.5f, 1.0, 0.0);
+        auto infer_finish = std::chrono::high_resolution_clock::now();
+        time_decode_infer += std::chrono::duration_cast<std::chrono::milliseconds>(infer_finish - infer_start).count();    
 
-        xt::xtensor<uint8_t, 2> segs = xt::zeros<uint8_t>({original_size[0], original_size[1]});
-
-        for (int idx = 0; idx < medsam_seg.shape()[0]; ++idx)
-        {
-            auto mask = xt::view(medsam_seg, idx, 0, xt::all(), xt::all());
-            xt::filtration(segs, mask > 0) = idx + 1;
-        }
-
-        return segs;
+        return xt::adapt((float*)mat2.data, mat2.total(), xt::no_ownership(), std::vector<int>{mat2.rows, mat2.cols});
     }
 };
 
@@ -239,10 +241,12 @@ void infer_2d(std::string img_file, std::string seg_file, Encoder &encoder, Deco
 
     auto img = encoder.preprocess_2D(original_img);
     ov::Tensor input_tensor(ov::element::f32, INPUT_SHAPE, img.data());
-
+    
     ov::Tensor embedding_tensor = encoder.encode_image(input_tensor);
 
     decoder.set_embedding_tensor(embedding_tensor);
+    xt::xtensor<uint16_t, 2> segs = xt::zeros<uint16_t>({original_size[0], original_size[1]});
+
     for (size_t i = 0; i < boxes.shape()[0]; ++i)
     {
         for (size_t j = 0; j < boxes.shape()[1]; ++j)
@@ -250,15 +254,18 @@ void infer_2d(std::string img_file, std::string seg_file, Encoder &encoder, Deco
             boxes(i, j) *= ratio;
             boxes(i, j) = int(boxes(i, j));
         }
+        ov::Tensor box_tensor(
+            ov::element::f32,
+            {1, 4},
+            boxes.data() + i * 4);
+
+        auto mask = decoder.decode_mask(box_tensor);
+        xt::filtration(segs, mask > 0) = i + 1;
     }
-    ov::Tensor boxes_ov_tensor(
-        ov::element::f32,
-        {static_cast<size_t>(boxes.shape()[0]), boxes.shape()[1]},
-        boxes.data());
-    auto segs = decoder.decode_mask(boxes_ov_tensor);
     
-    std::remove(seg_file.c_str());
-    xt::dump_npz(seg_file, "segs", segs, false);
+    // std::remove(seg_file.c_str());
+    xt::dump_npz(seg_file, "segs", segs, true);
+    
 }
 
 bool starts_with(const std::string &str, const std::string &prefix)
@@ -271,30 +278,24 @@ bool ends_with(const std::string &str, const std::string &suffix)
     return str.size() >= suffix.size() && str.compare(str.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
-int main(int argc, char **argv)
+void process(std::string encoder_file, std::string decoder_file, std::string model_cache_path, std::string imgs_path, std::string segs_path)
 {
-    if (argc != 6)
-    {
-        std::cerr << "Usage: " << argv[0] << " <encoder.xml> <decoder.xml> <model cache folder> <imgs folder> <segs folder>\n";
-        return 1;
-    }
-
     ov::Core core;
     core.set_property("CPU", ov::hint::inference_precision(ov::element::f32));
     core.set_property("CPU", ov::hint::execution_mode(ov::hint::ExecutionMode::ACCURACY));
     core.set_property("CPU", ov::hint::performance_mode(ov::hint::PerformanceMode::LATENCY));
     core.set_property("CPU", ov::hint::num_requests(1));
-    core.set_property(ov::cache_dir(argv[3]));
-    Encoder encoder(core, argv[1]);
-    Decoder decoder(core, argv[2]);
+    core.set_property(ov::cache_dir(model_cache_path));
+    Encoder encoder(core, encoder_file);
+    Decoder decoder(core, decoder_file);
 
-    std::filesystem::path imgs_folder(argv[4]);
+    std::filesystem::path imgs_folder(imgs_path);
     if (!std::filesystem::is_directory(imgs_folder))
     {
         throw std::runtime_error(imgs_folder.string() + " is not a folder");
     }
 
-    std::filesystem::path segs_folder(argv[5]);
+    std::filesystem::path segs_folder(segs_path);
     if (!std::filesystem::exists(segs_folder) && !std::filesystem::create_directory(segs_folder))
     {
         throw std::runtime_error("Failed to create " + segs_folder.string());
@@ -303,7 +304,8 @@ int main(int argc, char **argv)
     {
         throw std::runtime_error(segs_folder.string() + " is not a folder");
     }
-
+    
+    double total = 0;
     for (const auto &entry : std::filesystem::directory_iterator(imgs_folder))
     {
         if (!entry.is_regular_file())
@@ -327,8 +329,30 @@ int main(int argc, char **argv)
             {
             }
             auto infer_finish = std::chrono::high_resolution_clock::now();
+            total += std::chrono::duration_cast<std::chrono::milliseconds>(infer_finish - infer_start).count();
             std::cout << "Inferred " << base_name << " in " << std::chrono::duration_cast<std::chrono::milliseconds>(infer_finish - infer_start).count() << "ms\n";
         }
+    }
+    std::cout << "Total time cost: " << total << std::endl;
+    std::cout << "Total time decode infer: " << time_decode_infer << std::endl;
+}
+
+int main(int argc, char **argv)
+{
+    if (argc != 6)
+    {
+        std::cerr << "Usage: " << argv[0] << " <encoder.xml> <decoder.xml> <model cache folder> <imgs folder> <segs folder>\n";
+        return 1;
+    }
+
+    try
+    {
+        process(argv[1], argv[2], argv[3], argv[4], argv[5]);
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Error: " << e.what() << std::endl;
+        return 1;
     }
 
     return 0;
