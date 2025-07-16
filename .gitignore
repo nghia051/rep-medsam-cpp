@@ -175,3 +175,5 @@ cython_debug/
 .vs/
 
 .vscode/settings.json
+
+./output
