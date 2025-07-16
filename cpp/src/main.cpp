@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <iostream>
 #include <string>
+#include <fstream>
 
 #include <opencv2/opencv.hpp>
 #include <openvino/openvino.hpp>
@@ -34,6 +35,17 @@ std::array<size_t, 2> get_preprocess_shape(size_t oldh, size_t oldw)
     size_t newh = scale * oldh + 0.5;
     size_t neww = scale * oldw + 0.5;
     return {newh, neww};
+}
+
+xt::xtensor<float, 1> get_bbox(xt::xtensor<float, 2>& mask)
+{
+    auto indices = xt::where(mask > 0);
+    auto y_indices = indices[0], x_indices = indices[1];
+    auto x_min = *std::min_element(x_indices.begin(), x_indices.end());
+    auto x_max = *std::max_element(x_indices.begin(), x_indices.end());
+    auto y_min = *std::min_element(y_indices.begin(), y_indices.end());
+    auto y_max = *std::max_element(y_indices.begin(), y_indices.end());
+    return {(float)x_min, (float)y_min, (float)x_max, (float)y_max};
 }
 
 template <class T>
@@ -112,13 +124,24 @@ struct Encoder
     {
         assert(original_img.shape()[0] == 3);
         cv::Mat mat1(cv::Size(original_size[1], original_size[0]), CV_8UC3, original_img.data()), mat2;
-        cv::resize(mat1, mat2, cv::Size(new_size[1], new_size[0]), cv::INTER_LINEAR);
+        cv::resize(mat1, mat2, cv::Size(new_size[1], new_size[0]), 0, 0, cv::INTER_AREA);
 
         xt::xtensor<float, 3> img = xt::adapt((uint8_t*)mat2.data, mat2.total() * mat2.channels(), xt::no_ownership(), std::vector<int>{mat2.rows, mat2.cols, mat2.channels()});
         img = (img - xt::amin(img)()) / std::clamp(xt::amax(img)() - xt::amin(img)(), 1e-8f, 1e18f);
 
         return xt::pad(img, {{0, IMAGE_ENCODER_INPUT_SIZE - new_size[0]}, {0, IMAGE_ENCODER_INPUT_SIZE - new_size[1]}, {0, 0}});
     }
+
+    xt::xtensor<float, 3> preprocess_3D(xt::xtensor<uint8_t, 3>& original_img, int z)
+    {
+        auto data = original_img.data() + z * original_size[0] * original_size[1];
+        cv::Mat mat1(cv::Size(original_size[1], original_size[0]), CV_8UC1, data), mat2;
+        cv::resize(mat1, mat2, cv::Size(new_size[1], new_size[0]), 0, 0, cv::INTER_AREA);
+
+        xt::xtensor<float, 3> img = xt::adapt((uint8_t*)mat2.data, mat2.total(), xt::no_ownership(), std::vector<int>{mat2.rows, mat2.cols, 1});
+        img = (img - xt::amin(img)()) / std::clamp(xt::amax(img)() - xt::amin(img)(), 1e-8f, 1e18f);
+        return xt::repeat(xt::pad(img, {{0, IMAGE_ENCODER_INPUT_SIZE - new_size[0]}, {0, IMAGE_ENCODER_INPUT_SIZE - new_size[1]}, {0, 0}}), 3, 2);
+  }
 };
 
 struct Decoder
@@ -153,7 +176,7 @@ struct Decoder
         mask = xt::view(mask, xt::range(_, new_size[0]), xt::range(_, new_size[1]));
 
         cv::Mat mat1(cv::Size(new_size[1], new_size[0]), CV_32FC1, mask.data()), mat2;
-        cv::resize(mat1, mat2, cv::Size(original_size[1], original_size[0]), cv::INTER_LINEAR);
+        cv::resize(mat1, mat2, cv::Size(original_size[1], original_size[0]), 0, 0, cv::INTER_LINEAR);
         return xt::adapt((float*)mat2.data, mat2.total(), xt::no_ownership(), std::vector<int>{mat2.rows, mat2.cols});
     }
 };
@@ -168,7 +191,8 @@ void infer_2d(std::string img_file, std::string seg_file, Encoder &encoder, Deco
 
     ImageSize original_size = {original_img.shape()[0], original_img.shape()[1]};
     ImageSize new_size = get_preprocess_shape(original_size[0], original_size[1]);
-    float ratio = 1.0f * IMAGE_ENCODER_INPUT_SIZE / std::max(original_size[0], original_size[1]);
+    double ratio = (double)1.0 * IMAGE_ENCODER_INPUT_SIZE / std::max(original_size[0], original_size[1]);
+    boxes *= ratio;
 
     encoder.set_sizes(original_size, new_size);
     decoder.set_sizes(original_size, new_size);
@@ -186,12 +210,6 @@ void infer_2d(std::string img_file, std::string seg_file, Encoder &encoder, Deco
     decoder.set_embedding_tensor(embedding_tensor);
     for (int i = 0; i < boxes.shape()[0]; ++i)
     {
-        for (size_t j = 0; j < boxes.shape()[1]; ++j)
-        {
-            boxes(i, j) *= ratio; // Scale the box coordinates
-            boxes(i, j) = int(boxes(i, j));
-        }
-
         ov::Tensor box_tensor(ov::element::f32, {1, 4}, boxes.data() + i * 4);
         
         // auto decoder_start = std::chrono::high_resolution_clock::now();
@@ -202,7 +220,124 @@ void infer_2d(std::string img_file, std::string seg_file, Encoder &encoder, Deco
         xt::filtration(segs, mask > 0) = i + 1;
     }
 
-    xt::dump_npz(seg_file, "segs", segs, true);
+    xt::dump_npz(seg_file, "segs", segs, true, false);
+}
+
+ov::Tensor copy_ov(ov::Tensor t)
+{
+    ov::Tensor copied_tensor(t.get_element_type(), t.get_shape());
+    std::memcpy(copied_tensor.data(), t.data(), t.get_byte_size());
+    return copied_tensor;
+}
+
+void apply_bbox_shift(xt::xtensor<float, 1>& box, int shift=3)
+{
+    box[0] = std::max((box[0]-shift), 0.0f);
+    box[1] = std::max((box[1]-shift), 0.0f);
+    box[2] = std::min((box[2]+shift), (float)IMAGE_ENCODER_INPUT_SIZE);
+    box[3] = std::min((box[3]+shift), (float)IMAGE_ENCODER_INPUT_SIZE);
+}
+
+void infer_3d(std::string img_file, std::string seg_file, Encoder& encoder, Decoder& decoder)
+{
+    auto npz_data = xt::load_npz(img_file);
+    auto original_img = cast_npy_file<xt::xtensor<uint8_t, 3>>(npz_data["imgs"]);
+    auto boxes = cast_npy_file<xt::xtensor<uint16_t, 2>>(npz_data["boxes"]);
+    assert(boxes.shape()[1] == 6);
+
+    ImageSize original_size = {original_img.shape()[1], original_img.shape()[2]};
+    ImageSize new_size = get_preprocess_shape(original_size[0], original_size[1]);
+    
+    encoder.set_sizes(original_size, new_size);
+    decoder.set_sizes(original_size, new_size);
+
+    cache::lru_cache<int, ov::Tensor> cached_embeddings(EMBEDDINGS_CACHE_SIZE);
+    auto get_embedding = [&](int z)
+    {
+        if (cached_embeddings.exists(z))
+            return copy_ov(cached_embeddings.get(z));
+        
+        auto img = encoder.preprocess_3D(original_img, z);
+        ov::Tensor input_tensor(ov::element::f32, INPUT_SHAPE, img.data());
+        ov::Tensor embedding_tensor = encoder.encode_image(input_tensor);
+        cached_embeddings.put(z, copy_ov(embedding_tensor));
+
+        return copy_ov(embedding_tensor);
+    };
+
+    auto process_slice = [&](int z, xt::xtensor<float, 1>& box)
+    {
+        ov::Tensor embedding_tensor = get_embedding(z);
+        ov::Tensor box_tensor(ov::element::f32, {1, 4}, box.data());
+        decoder.set_embedding_tensor(embedding_tensor);
+        return decoder.decode_mask(box_tensor);
+    };
+
+    xt::xtensor<uint16_t, 3> segs = xt::zeros_like(original_img);
+    for (int i = 0; i < boxes.shape()[0]; ++i)
+    {
+        uint16_t x_min = boxes(i, 0), y_min = boxes(i, 1), z_min = boxes(i, 2);
+        uint16_t x_max = boxes(i, 3), y_max = boxes(i, 4), z_max = boxes(i, 5);
+        z_min = std::max(z_min, uint16_t(0));
+        z_max = std::min(z_max, uint16_t(original_img.shape()[0]));
+        uint16_t z_middle = (z_min + z_max) / 2;
+
+        xt::xtensor<float, 1> box_default = {(float)x_min, (float)y_min, (float)x_max, (float)y_max};
+        box_default = 256 * box_default / std::max(original_size[0], original_size[1]); // scale to 256x256
+        box_default = xt::floor(box_default);
+
+        // infer z_middle
+        xt::xtensor<float, 1> box_middle;
+        {
+            auto mask_middle = process_slice(z_middle, box_default);
+            xt::filtration(xt::view(segs, z_middle, xt::all(), xt::all()), mask_middle > 0) = i + 1;
+            if (xt::amax(mask_middle)() > 0)
+            {
+                box_middle = 256 * get_bbox(mask_middle) / std::max(original_size[0], original_size[1]);
+                apply_bbox_shift(box_middle);
+            }
+            else
+            {
+                box_middle = box_default;
+            }
+        }
+
+        // infer z_middle+1 to z_max-1
+        auto last_box = box_middle;
+        for (int z = z_middle + 1; z < z_max; ++z)
+        {
+            auto mask = process_slice(z, last_box);
+            xt::filtration(xt::view(segs, z, xt::all(), xt::all()), mask > 0) = i + 1;
+            if (xt::amax(mask)() > 0)
+            {
+                last_box = 256 * get_bbox(mask) / std::max(original_size[0], original_size[1]);
+                apply_bbox_shift(last_box);
+            }
+            else
+            {
+                last_box = box_default;
+            }
+        }
+
+        // infer z_min to z_middle-1
+        last_box = box_middle;
+        for (int z = z_middle - 1; z >= z_min; --z)
+        {
+            auto mask = process_slice(z, last_box);
+            xt::filtration(xt::view(segs, z, xt::all(), xt::all()), mask > 0) = i + 1;
+            if (xt::amax(mask)() > 0)
+            {
+                last_box = 256 * get_bbox(mask) / std::max(original_size[0], original_size[1]);
+                apply_bbox_shift(last_box);
+            }
+            else
+            {
+                last_box = box_default;
+            }
+        }
+    }
+
+    xt::dump_npz(seg_file, "segs", segs, true, false);
 }
 
 bool starts_with(const std::string &str, const std::string &prefix)
@@ -250,6 +385,10 @@ int main(int argc, char **argv)
 
     std::chrono::milliseconds sum_duration(0);
 
+    std::filesystem::path csv_path = segs_folder.parent_path() / "efficiency.csv";
+    std::ofstream efficiency_file(csv_path, std::ios::out | std::ios::app);
+    efficiency_file << "case,time\n";
+
     for (const auto &entry : std::filesystem::directory_iterator(imgs_folder))
     {
         if (!entry.is_regular_file())
@@ -258,7 +397,6 @@ int main(int argc, char **argv)
         }
 
         auto base_name = entry.path().filename().string();
-        // if (std::string(base_name) == "2DBox_CT_0110.npz") break;
         
         if (ends_with(base_name, ".npz"))
         {
@@ -273,14 +411,19 @@ int main(int argc, char **argv)
             }
             else
             {
+                infer_3d(img_file, seg_file, encoder, decoder);
             }
             auto infer_finish = std::chrono::high_resolution_clock::now();
             std::cout << "Inferred " << base_name << " in " << std::chrono::duration_cast<std::chrono::milliseconds>(infer_finish - infer_start).count() << "ms\n";
             sum_duration += std::chrono::duration_cast<std::chrono::milliseconds>(infer_finish - infer_start);
+            
+            efficiency_file << base_name << "," << std::chrono::duration_cast<std::chrono::milliseconds>(infer_finish - infer_start).count() << "\n";
         }
     }
 
     std::cout << "Total time: " << sum_duration.count() << "ms\n";
-
+    
+    efficiency_file.close();
+    
     return 0;
 }

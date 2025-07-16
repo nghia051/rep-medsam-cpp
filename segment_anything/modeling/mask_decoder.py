@@ -13,7 +13,6 @@ from typing import List, Tuple, Type
 
 from .common import LayerNorm2d
 
-
 class MaskDecoder(nn.Module):
     def __init__(
         self,
@@ -137,7 +136,8 @@ class MaskDecoder(nn.Module):
         else:
             src = image_embeddings
         src = src + dense_prompt_embeddings
-        pos_src = torch.repeat_interleave(image_pe, tokens.shape[0], dim=0)
+        # print(type(torch.repeat_interleave(image_pe, int(tokens.shape[0]), dim=0)))
+        pos_src = torch.repeat_interleave(image_pe, int(tokens.shape[0]), dim=0)
         b, c, h, w = src.shape
 
         # Run the transformer

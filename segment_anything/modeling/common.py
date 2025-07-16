@@ -11,15 +11,21 @@ import torch.nn as nn
 from typing import Type
 
 
-class MLPBlock(nn.Module):
+'''
+    input size: (1024, 1024, 3)
+    patches: (16, 16, 3)
+    embedding size: (256)
+'''
+
+class MLPBlock(nn.Module): # mlp in Transformer
     def __init__(
         self,
         embedding_dim: int,
         mlp_dim: int,
-        act: Type[nn.Module] = nn.GELU,
+        act: Type[nn.Module] = nn.GELU, # 
     ) -> None:
         super().__init__()
-        self.lin1 = nn.Linear(embedding_dim, mlp_dim)
+        self.lin1 = nn.Linear(embedding_dim, mlp_dim) # embedding_dim = 256
         self.lin2 = nn.Linear(mlp_dim, embedding_dim)
         self.act = act()
 

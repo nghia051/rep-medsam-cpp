@@ -7,15 +7,15 @@ from pathlib import Path
 import io
 import onnx
 from onnxsim import simplify
-from onnxruntime.quantization import QuantType
-from onnxruntime.quantization.quantize import quantize_dynamic
-import onnxruntime as ort
+
+from repvit import RepViT
+from repvit_cfgs import repvit_m1_0_cfgs
 
 from segment_anything.modeling import MaskDecoder, PromptEncoder, TwoWayTransformer
-from tiny_vit_sam import TinyViT
+from rep_medsam_utils import replace_batchnorm
 import argparse
 
-from models.onnx import DecoderOnnxModel
+from models.onnx import EncoderOnnxModel, DecoderOnnxModel
 
 
 #%% set seeds
@@ -29,7 +29,7 @@ parser = argparse.ArgumentParser()
 parser.add_argument(
     '-lite_medsam_checkpoint_path',
     type=str,
-    default="work_dir/LiteMedSAM/lite_medsam.pth",
+    default="./work_dir/rep_medsam/rep_medsam.pth",
     help='path to the checkpoint of MedSAM-Lite',
 )
 parser.add_argument(
@@ -110,26 +110,7 @@ class MedSAM_Lite(nn.Module):
 
         return masks
 
-medsam_lite_image_encoder = TinyViT(
-    img_size=256,
-    in_chans=3,
-    embed_dims=[
-        64, ## (64, 256, 256)
-        128, ## (128, 128, 128)
-        160, ## (160, 64, 64)
-        320 ## (320, 64, 64) 
-    ],
-    depths=[2, 2, 6, 2],
-    num_heads=[2, 4, 5, 10],
-    window_sizes=[7, 7, 14, 7],
-    mlp_ratio=4.,
-    drop_rate=0.,
-    drop_path_rate=0.0,
-    use_checkpoint=False,
-    mbconv_expand_ratio=4.0,
-    local_conv_size=3,
-    layer_lr_decay=0.8
-)
+medsam_lite_image_encoder = RepViT(cfgs= repvit_m1_0_cfgs)
 
 medsam_lite_prompt_encoder = PromptEncoder(
     embed_dim=256,
@@ -159,6 +140,7 @@ medsam_lite_model = MedSAM_Lite(
 
 lite_medsam_checkpoint = torch.load(lite_medsam_checkpoint_path, map_location='cpu')
 medsam_lite_model.load_state_dict(lite_medsam_checkpoint)
+replace_batchnorm(medsam_lite_model.image_encoder)
 medsam_lite_model.to(device)
 medsam_lite_model.eval()
 
@@ -167,13 +149,17 @@ def convert_to_openvino(onnx_model: Path):
     ov.save_model(model, onnx_model.with_suffix(".xml"), compress_to_fp16=False)
 
 def export_encoder(sam_model: MedSAM_Lite, export_optimized: bool = False, export_quantized: bool = False, output_dir: Path = None):
-    dummy_inputs = torch.randn((1, 3, 256, 256), dtype = torch.float32)
+    onnx_model = EncoderOnnxModel(
+        image_encoder=sam_model.image_encoder,
+    )
+    
+    dummy_inputs = torch.randn((256, 256, 3), dtype = torch.float32)
 
     output_file = output_dir / "encoder.onnx"
 
     buffer = io.BytesIO()
     torch.onnx.export(
-        model=sam_model.image_encoder,
+        model=onnx_model, 
         args=dummy_inputs,
         f=buffer,
         export_params=True,
@@ -198,25 +184,6 @@ def export_encoder(sam_model: MedSAM_Lite, export_optimized: bool = False, expor
         f.write(buffer.read())
     
     convert_to_openvino(output_file)
-
-    if export_optimized:
-        optimized_output_file = output_file.with_suffix(".optimized.onnx")
-        opt = ort.SessionOptions()
-        opt.optimized_model_filepath = optimized_output_file.as_posix()
-        opt.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        _ = ort.InferenceSession(output_file, opt, providers=["CPUExecutionProvider"])
-
-    if export_quantized:
-        quantized_output_file = output_file.with_suffix(".quantized.onnx")
-        quantize_dynamic(
-            model_input=output_file,
-            model_output=quantized_output_file,
-            per_channel=False,
-            reduce_range=False,
-            weight_type=QuantType.QUInt8,
-        )
-
-        convert_to_openvino(quantized_output_file)
 
 def export_decoder(sam_model: MedSAM_Lite, export_optimized: bool = False, export_quantized: bool = False, output_dir: Path = None):
     onnx_model = DecoderOnnxModel(
@@ -246,9 +213,6 @@ def export_decoder(sam_model: MedSAM_Lite, export_optimized: bool = False, expor
         do_constant_folding=True, 
         input_names=list(dummy_inputs.keys()),
         output_names=output_names,
-        dynamic_axes={
-            "boxes": {0: "num_boxes"},
-        },
     )
     buffer.seek(0, 0)
 
@@ -266,33 +230,14 @@ def export_decoder(sam_model: MedSAM_Lite, export_optimized: bool = False, expor
     
     convert_to_openvino(output_file)
 
-    if export_optimized:
-        optimized_output_file = output_file.with_suffix(".optimized.onnx")
-        opt = ort.SessionOptions()
-        opt.optimized_model_filepath = optimized_output_file.as_posix()
-        opt.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
-        _ = ort.InferenceSession(output_file, opt, providers=["CPUExecutionProvider"])
-
-    if export_quantized:
-        quantized_output_file = output_file.with_suffix(".quantized.onnx")
-        quantize_dynamic(
-            model_input=output_file,
-            model_output=quantized_output_file,
-            per_channel=False,
-            reduce_range=False,
-            weight_type=QuantType.QUInt8,
-        )
-
-        convert_to_openvino(quantized_output_file)
-
 if __name__ == '__main__':
     onnx_output_dir = Path("./openvino_models/lite_medsam_default")
 
-    print("Exporting encoder...")
-    export_encoder(medsam_lite_model,
-                   export_optimized=False,
-                   export_quantized=False,
-                   output_dir=onnx_output_dir)
+    # print("Exporting encoder...")
+    # export_encoder(medsam_lite_model,
+    #                export_optimized=False,
+    #                export_quantized=False,
+    #                output_dir=onnx_output_dir)
 
     print("Exporting decoder...")
     export_decoder(medsam_lite_model,

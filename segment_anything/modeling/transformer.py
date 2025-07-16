@@ -196,21 +196,24 @@ class Attention(nn.Module):
         downsample_rate: int = 1,
     ) -> None:
         super().__init__()
-        self.embedding_dim = embedding_dim
+        self.embedding_dim = embedding_dim # 256
         self.internal_dim = embedding_dim // downsample_rate
         self.num_heads = num_heads
         assert (
             self.internal_dim % num_heads == 0
         ), "num_heads must divide embedding_dim."
 
-        self.q_proj = nn.Linear(embedding_dim, self.internal_dim)
+        # linear transformation from embedding dim to internal network dim
+        self.q_proj = nn.Linear(embedding_dim, self.internal_dim) 
         self.k_proj = nn.Linear(embedding_dim, self.internal_dim)
         self.v_proj = nn.Linear(embedding_dim, self.internal_dim)
-        self.out_proj = nn.Linear(self.internal_dim, embedding_dim)
+        self.out_proj = nn.Linear(self.internal_dim, embedding_dim) 
+        # transformation from internal dim to embeeding dim
 
+        # split x (k, q, v) into seperate heads 
     def _separate_heads(self, x: Tensor, num_heads: int) -> Tensor:
-        b, n, c = x.shape
-        x = x.reshape(b, n, num_heads, c // num_heads)
+        b, n, c = x.shape # x.shape = (B, N_tokens, C) C (int) - Dimension of each token
+        x = x.reshape(b, n, num_heads, c // num_heads) # split x along c 
         return x.transpose(1, 2)  # B x N_heads x N_tokens x C_per_head
 
     def _recombine_heads(self, x: Tensor) -> Tensor:
@@ -219,7 +222,7 @@ class Attention(nn.Module):
         return x.reshape(b, n_tokens, n_heads * c_per_head)  # B x N_tokens x C
 
     def forward(self, q: Tensor, k: Tensor, v: Tensor) -> Tensor:
-        # Input projections
+        # Input projections 
         q = self.q_proj(q)
         k = self.k_proj(k)
         v = self.v_proj(v)
@@ -229,15 +232,15 @@ class Attention(nn.Module):
         k = self._separate_heads(k, self.num_heads)
         v = self._separate_heads(v, self.num_heads)
 
-        # Attention
-        _, _, _, c_per_head = q.shape
+        # Attention (dot product)
+        _, _, _, c_per_head = q.shape # B X N_heads X N_tokens X C_per_head
         attn = q @ k.permute(0, 1, 3, 2)  # B x N_heads x N_tokens x N_tokens
-        attn = attn / math.sqrt(c_per_head)
+        attn = attn / math.sqrt(c_per_head) # sqrt(c_per_head) as each head with c_per_head dim
         attn = torch.softmax(attn, dim=-1)
 
         # Get output
-        out = attn @ v
-        out = self._recombine_heads(out)
-        out = self.out_proj(out)
+        out = attn @ v # (q @ k^T)/ sqrt(dim_k) @ v 
+        out = self._recombine_heads(out) # concat
+        out = self.out_proj(out) # linear
 
         return out

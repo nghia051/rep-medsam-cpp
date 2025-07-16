@@ -79,6 +79,7 @@ if __name__ == '__main__':
     
     npz_names = listdir(gt_dir)
     npz_names = [npz_name for npz_name in npz_names if npz_name.endswith('.npz')]
+    npz_names = [npz_name for npz_name in npz_names if "Microscope" in npz_name]
     with mp.Pool(num_workers) as pool:
         with tqdm(total=len(npz_names)) as pbar:
             for i, (npz_name, dsc, nsd) in enumerate(pool.imap_unordered(compute_metrics, npz_names)):

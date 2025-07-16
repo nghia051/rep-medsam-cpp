@@ -12,10 +12,13 @@ from segment_anything.modeling import MaskDecoder, PromptEncoder, TwoWayTransfor
 from matplotlib import pyplot as plt
 import cv2
 import argparse
+from collections import OrderedDict
+import pandas as pd
 from datetime import datetime
 from repvit import RepViT
 from repvit_cfgs import repvit_m1_0_cfgs
 from rep_medsam_utils import replace_batchnorm
+
 #%% set seeds
 torch.set_float32_matmul_precision('high')
 torch.manual_seed(2024)
@@ -411,7 +414,7 @@ def MedSAM_infer_npz_3D(img_npz_file):
     npz_data = np.load(img_npz_file, 'r', allow_pickle=True)
     img_3D = npz_data['imgs'] # (D, H, W)
     spacing = npz_data['spacing'] # not used in this demo because it treats each slice independently
-    segs = np.zeros_like(img_3D, dtype=np.uint8) 
+    segs = np.zeros_like(img_3D, dtype=np.uint16)
     boxes_3D = npz_data['boxes'] # [[x_min, y_min, z_min, x_max, y_max, z_max]]
 
     for idx, box3D in enumerate(boxes_3D, start=1):
@@ -524,18 +527,22 @@ def MedSAM_infer_npz_3D(img_npz_file):
 
 
 if __name__ == '__main__':
-    img_npz_files = sorted(glob(join("./dataset/imgs/", '*.npz'), recursive=True))
-
-    for img_npz_file in tqdm(img_npz_files[:]):
-        if basename(img_npz_file).startswith('3D'):
-            continue
+    img_npz_files = sorted(glob(join(data_root, '*.npz'), recursive=True))
+    efficiency = OrderedDict()
+    efficiency['case'] = []
+    efficiency['time'] = []
     
+    for img_npz_file in tqdm(img_npz_files):
         start_time = time()
         if basename(img_npz_file).startswith('3D'):
             MedSAM_infer_npz_3D(img_npz_file)
         else:
             MedSAM_infer_npz_2D(img_npz_file)
         end_time = time()
-       
+        efficiency['case'].append(basename(img_npz_file))
+        efficiency['time'].append(end_time - start_time)
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(current_time, 'file name:', basename(img_npz_file), 'time cost:', np.round(end_time - start_time, 4))
+    
+    efficiency_df = pd.DataFrame(efficiency)
+    efficiency_df.to_csv(join("./output/rep_medsam_python", 'efficiency_final.csv'), index=False)
