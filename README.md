@@ -1,12 +1,12 @@
 # <p align="center">Rep-MedSAM C++: High-Performance Inference Pipeline for Edge Devices</p>
 
 <div style="display: flex; justify-content: center; align-items: stretch;">
-  <figure style="width: 50%; height: 300px;">
-    <img width="100%" style="height: 100%;" alt="Rep-MedSAM Model" src="assets/repmedsam_model.png">
+  <figure style="width: 50%;">
+    <img width="100%" alt="Rep-MedSAM Model" src="assets/repmedsam_model.png">
     <figcaption><strong>Fig.1.</strong> Overview of Rep-MedSAM framework.</figcaption>
   </figure>
-  <figure style="width: 50%; height: 300px;">
-    <img width="100%" style="height: 100%;" alt="C++ Pipeline" src="assets/pipeline_cpp.png">
+  <figure style="width: 50%;">
+    <img width="100%" alt="C++ Pipeline" src="assets/pipeline_cpp.png">
     <figcaption><strong>Fig.2.</strong> C++ inference pipeline for 2D images.</figcaption>
   </figure>
 </div>
